@@ -1,0 +1,105 @@
+{
+  "zhihu": {
+    "article": {
+      "url": "https://zhuanlan.zhihu.com/write",
+      "title": "textarea[placeholder*='标题']",
+      "body": ".public-DraftEditor-content[contenteditable='true']",
+      "upload": null,
+      "submit": null,
+      "success": null,
+      "publishSteps": [],
+      "aiDisclosure": {
+        "selector": null
+      },
+      "flow": "zhihu-article",
+      "settingsTrigger": "button.PublishPanel-triggerButton",
+      "panel": ".PublishPanel-content",
+      "finalButton": null,
+      "resultTimeoutMs": 45000
+    },
+    "video": {
+      "url": "https://www.zhihu.com/creator/video-upload",
+      "upload": "input[type='file'][accept*='video']",
+      "title": "input[placeholder*='标题']",
+      "body": "textarea[placeholder*='简介']",
+      "submit": null,
+      "success": null,
+      "publishSteps": [],
+      "aiDisclosure": {
+        "selector": null
+      }
+    }
+  },
+  "bilibili": {
+    "video": {
+      "url": "https://member.bilibili.com/platform/upload/video/frame",
+      "upload": ".bcc-upload-wrapper input[type=\"file\"][accept*=\".mp4\"]",
+      "title": "input[placeholder=\"请输入稿件标题\"]",
+      "body": "[editor_id=\"desc_at_editor\"] .ql-editor[contenteditable=\"true\"]",
+      "submit": ".submit-container .submit-actions .submit-add",
+      "success": null,
+      "publishSteps": [],
+      "aiDisclosure": {
+        "selector": null
+      },
+      "flow": "bilibili-video",
+      "resultTimeoutMs": 45000
+    },
+    "article": {
+      "url": "https://member.bilibili.com/platform/upload/text/edit",
+      "title": "textarea[placeholder*='标题'], input[placeholder*='标题']",
+      "body": "div[contenteditable='true']",
+      "upload": null,
+      "submit": null,
+      "success": null,
+      "publishSteps": [],
+      "aiDisclosure": {
+        "selector": null
+      }
+    }
+  },
+  "douyin": {
+    "video": {
+      "flow": "douyin",
+      "url": "https://creator.douyin.com/creator-micro/content/upload",
+      "upload": "input[type='file'][accept*='video'],input[type='file'][accept*='.mp4']",
+      "title": "input[placeholder*='标题']",
+      "body": ".notranslate[contenteditable='true'],[contenteditable='true'][data-placeholder*='作品简介'],textarea[placeholder*='简介']",
+      "submit": null,
+      "success": null,
+      "aiDisclosure": {
+        "selector": null,
+        "trigger": null
+      },
+      "editorTimeoutMs": 180000,
+      "readyTimeoutMs": 180000,
+      "resultTimeoutMs": 45000
+    }
+  },
+  "xhs": {
+    "video": {
+      "flow": "xhs",
+      "url": "https://creator.xiaohongshu.com/publish/publish?source=official",
+      "upload": "input[type='file'][accept*='video'],input[type='file'][accept*='.mp4']",
+      "title": "input[placeholder*='标题']",
+      "body": ".tiptap[contenteditable='true'],.ProseMirror[contenteditable='true'],textarea[placeholder*='正文']",
+      "submit": null,
+      "success": null,
+      "aiDisclosure": {
+        "selector": null
+      }
+    },
+    "note": {
+      "flow": "xhs",
+      "url": "https://creator.xiaohongshu.com/publish/publish?source=official",
+      "upload": "input[type='file'][accept*='image'],input[type='file'][accept*='.jpg'],input[type='file'][accept*='.png']",
+      "title": "input[placeholder*='标题']",
+      "body": ".tiptap[contenteditable='true'],.ProseMirror[contenteditable='true'],textarea[placeholder*='正文']",
+      "submit": null,
+      "success": null,
+      "aiDisclosure": {
+        "selector": null
+      }
+    }
+  }
+}

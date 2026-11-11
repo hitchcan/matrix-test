@@ -1,0 +1,32 @@
+{
+  "name": "matrix-studio",
+  "version": "0.9.3",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "npm run build:editor && node server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check server.mjs && node --check browser-runtime.mjs && node --check public/app.js && node --check rich-content.mjs && node --check publication.mjs && node --check rich-check.mjs && node --check zhihu-article.mjs && node --check zhihu-ai.mjs && node --check platform-catalog.mjs && node --check creator-identity.mjs && node --check xhs-publisher.mjs && node --check douyin-publisher.mjs && node --check zhihu-no-ai.mjs && node --check xhs-disclosure.mjs && node --check bilibili-identity.mjs && node --check bilibili-publisher.mjs && node --check xhs-closed-publish.mjs && node --check bilibili-cover.mjs && node --check douyin-verification.mjs",
+    "build:editor": "node scripts/build-editor.mjs"
+  },
+  "dependencies": {
+    "@tiptap/core": "^3.33.0",
+    "@tiptap/extension-image": "^3.33.0",
+    "@tiptap/extension-table": "^3.33.0",
+    "@tiptap/extension-text-align": "^3.33.0",
+    "@tiptap/extension-text-style": "^3.33.0",
+    "@tiptap/pm": "^3.33.0",
+    "@tiptap/starter-kit": "^3.33.0",
+    "dompurify": "^3.4.17",
+    "esbuild": "^0.28.2",
+    "mammoth": "^1.13.0",
+    "playwright": "^1.65.0",
+    "sanitize-html": "^2.18.1"
+  },
+  "devDependencies": {
+    "jszip": "^3.10.2"
+  }
+}

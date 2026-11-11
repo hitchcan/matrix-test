@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Matrix Studio 本地多平台内容分发工作台"><title>Matrix Studio · 内容分发工作台</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="#compose"><span class="brand-mark">m<span>·</span></span><span>matrix<span class="brand-sub">创作与分发工作台</span></span></a>
+    <div class="workspace"><span class="workspace-icon">知</span><div>我的创作空间<small>个人工作区 · 本地</small></div><span class="chevron">⌄</span></div>
+    <div class="nav-label">工作空间</div>
+    <nav aria-label="主导航">
+      <a href="#compose" data-nav="compose"><span class="nav-icon">▧</span>内容工作室<span class="nav-end">＋</span></a>
+      <a href="#tasks" data-nav="tasks"><span class="nav-icon">☷</span>分发任务<span class="count" id="nav-count">0</span></a>
+      <a href="#assets" data-nav="assets"><span class="nav-icon">▱</span>素材库</a>
+      <a href="#accounts" data-nav="accounts"><span class="nav-icon">◎</span>账号管理</a>
+    </nav>
+    <div class="sidebar-note"><span class="dot"></span>从轻量的工作流开始<p>专注内容，把每一次分发<br>交给有序的流程。</p><a href="#guide">查看接入路线 <span>↗</span></a></div>
+    <div class="profile"><span class="avatar">M</span><div>本地创作者<small>LOCAL WORKSPACE</small></div><span class="local-dot"></span></div>
+  </aside>
+  <div class="shell">
+    <header class="topbar"><div><span class="muted">工作空间</span><span class="slash">/</span><span id="breadcrumb">内容工作室</span></div><div class="top-actions"><span class="local-badge"><span class="dot"></span>本地服务在线</span><span class="version">PREVIEW 0.9.3</span></div></header>
+    <main id="main"></main>
+    <footer><span>MATRIX STUDIO</span><span>内容有自己的节奏，分发也应该有。</span><span>本地存储 · 你的工作空间</span></footer>
+  </div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <dialog id="detail"><div id="detail-content"></div><button class="button secondary close-dialog">关闭</button></dialog>
+  <script type="module" src="/app.js"></script>
+</body></html>

@@ -1,0 +1,25 @@
+# 依赖（新机器执行 npm ci 安装）
+node_modules/
+
+# 本地运行时数据：SQLite 数据库、素材、浏览器 Profile、加密会话
+.data/
+
+# 本地环境变量与密钥
+.env
+.env.*
+!.env.example
+
+# 日志：包括根目录下的 .test-*.log 测试记录
+*.log
+logs/
+
+# 构建产物：由 npm run build:editor / npm start 生成
+public/editor.bundle.js
+
+# 编辑器与系统临时文件
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

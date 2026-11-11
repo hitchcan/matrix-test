@@ -1,0 +1,6 @@
+{
+  "zhihu": ".AppHeader-userInfo a[href*='zhihu.com/people/'], a.ProfileEntry-link[href*='/people/']",
+  "bilibili": ".bcc-global-header a[href*='space.bilibili.com/'], .bcc-header a[href*='space.bilibili.com/'], a.header-entry-avatar[href*='space.bilibili.com/']",
+  "xhs": ".user-info a[href*='xiaohongshu.com/user/profile/']",
+  "douyin": "[data-account-self] a[href*='douyin.com/user/'],[class*='user-info'] a[href*='douyin.com/user/'],[class*='accountInfo'] a[href*='douyin.com/user/']"
+}
