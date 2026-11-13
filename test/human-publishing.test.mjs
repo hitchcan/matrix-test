@@ -56,7 +56,7 @@ test('抖音后台模式保留同一页面，显示验证窗口不重启浏览�
  assert.equal(runtime.sessions.get(a.id),original);assert.equal(original.page,p);assert.equal(await p.evaluate(()=>window.verificationState),'preserved');assert.equal(original.background,false);assert.deepEqual(launches,[false]);
 });
 
-test('B站真实cover-img背景图封面可读回，不要求img标签',async t=>{const p=await pageFor(t);await p.setContent('<div class="cover-module-main"><div class="cover-slot"><div class="cover-img" style="background-image:url(https://example.test/cover.jpg);width:120px;height:90px">封面设置</div></div></div>');assert.equal(await bilibiliCoverReady(p),true);await requireBilibiliCover(p);});
+test('B站真实cover-img背景图封面可读回，不要求img标签',async t=>{const p=await pageFor(t);await p.route('https://example.test/cover.jpg',route=>route.fulfill({status:204}));await p.setContent('<div class="cover-module-main"><div class="cover-slot"><div class="cover-img" style="background-image:url(https://example.test/cover.jpg);width:120px;height:90px">封面设置</div></div></div>');assert.equal(await bilibiliCoverReady(p),true);await requireBilibiliCover(p);});
 
 for(const embedded of [false,true])test('抖音无dialog角色短信验证码识别，iframe='+embedded,async t=>{
  const p=await pageFor(t),html='<main><div><h3>接收短信验证码</h3><p>为确保是本人操作抖音账号</p><section><input placeholder="请输入验证码" style="width:220px;height:40px"><button id="send" onclick="window.sent=(window.sent||0)+1">获取验证码</button></section><button>验证</button></div></main>';

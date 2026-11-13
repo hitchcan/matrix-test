@@ -1,0 +1,21 @@
+<!doctype html><html><head><meta charset="utf-8"></head><body>
+<!-- Reduced public read-editor structure observed 2026-11-12. No user data. -->
+<textarea class="title-input__inner" placeholder="请输入标题（建议30字以内）" maxlength="60"></textarea>
+<div class="editor-container"><div class="ProseMirror" contenteditable="true"></div></div>
+<section class="publish-settings">
+  <div class="form-item"><label class="form-item-label">可见范围</label><label><input type="radio" name="visibility" checked>所有人可见</label><label><input type="radio" name="visibility">仅自己可见</label></div>
+  <div class="form-item"><label class="form-item-label">自定义封面</label><input id="cover" type="checkbox"><div class="select-cover"></div></div>
+  <div class="form-item"><label class="form-item-label">定时发布</label><input id="schedule" type="checkbox"></div>
+  <div class="creation-declaration"><div class="declaration-item"><label><input id="original" type="checkbox">声明此文章为原创，未经授权禁止转载</label></div><div class="declaration-item" id="ai-item"><label><input id="ai" type="checkbox"><div class="declaration-title">AI辅助创作声明</div><div>勾选后，图片将标识该内容使用人工智能合成技术</div></label></div></div>
+</section>
+<div class="publish-footer"><div class="footer-left"><button type="button" class="settings-button">发布设置</button></div><div class="footer-right"><button type="button" id="save">保存为草稿</button><button type="button" id="publish">发布</button></div></div>
+<div class="publish-success-dialog" hidden><div class="success-text">你的专栏已提交成功</div></div>
+<script>
+window.submits=0;window.imagePastes=0;
+document.querySelector('#publish').onclick=()=>{window.submits++;if(window.failSubmit){document.body.insertAdjacentHTML('beforeend','<div role="alert">网络错误</div>');return;}document.querySelector('.publish-success-dialog').hidden=false;};
+document.querySelector('.ProseMirror').addEventListener('paste',event=>{
+  event.preventDefault();
+  if(event.clipboardData.files.length){window.imagePastes++;document.execCommand('insertHTML',false,'<span class="eva3-enhanced-image-wrapper"><span contenteditable="false"><img class="eva3-image-content" src="https://i0.hdslb.com/bfs/fixture.png"></span><span class="eva3-image-caption is-placeholder" data-empty="true" contenteditable="false">点此添加图片注释，最多100字（可选）</span></span>');}
+  else document.execCommand('insertHTML',false,event.clipboardData.getData('text/html'));
+});
+</script></body></html>

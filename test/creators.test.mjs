@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {chromium} from 'playwright';
-import {mkdtempSync,rmSync} from 'node:fs';
+import {mkdtempSync,rmSync,readFileSync,existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,dirname,resolve,basename} from 'node:path';
 import {BrowserRuntime,PublishAdapter,loadAdapterRules} from '../browser-runtime.mjs';
@@ -13,12 +13,12 @@ const douyinHtml=(outcome='success')=>`<!doctype html><meta charset="utf-8"><div
 <input type="file" accept="video/mp4,video/*" onchange="uploaded()">
 <section id="editor" hidden><input placeholder="填写作品标题，为作品获得更多流量"><div class="notranslate" contenteditable="true" data-placeholder="添加作品简介"></div>
 <button aria-expanded="false" id="advanced" onclick="document.querySelector('#settings').hidden=false;this.setAttribute('aria-expanded','true')">高级设置</button>
-<div id="settings" hidden><span>自主声明</span><button id="declaration" onclick="showOptions()">无需添加声明</button></div>
+<div id="settings" hidden><div><span>自主声明</span><button id="declaration" onclick="showOptions()">无需添加声明</button></div><div><span>谁可以看</span><select id="visibility"><option value="public">公开</option><option value="private">仅自己可见</option></select></div></div>
 <button id="publish" disabled onclick="publishVideo()">发布</button></section><div id="success" role="status" hidden>发布成功</div><div id="failure" role="alert" hidden>发布失败，请验证</div>
 <script>
 window.posts=0;function uploaded(){window.names=Array.from(document.querySelector('input[type=file]').files).map(f=>f.name);history.replaceState({},'', '/creator-micro/content/post/video');setTimeout(()=>{document.querySelector('#editor').hidden=false;document.querySelector('#publish').disabled=false;},100);}
 function showOptions(){const menu=document.createElement('div');menu.id='menu';menu.setAttribute('role','listbox');for(const text of ['无需添加声明','内容由AI生成']){const option=document.createElement('div');option.setAttribute('role','option');option.textContent=text;option.onclick=()=>{document.querySelector('#declaration').textContent=text;menu.remove();};menu.append(option);}document.body.append(menu);}
-function publishVideo(){window.posts++;window.sentDeclaration=document.querySelector('#declaration').textContent;document.querySelector('${outcome==='success'?'#success':'#failure'}').hidden=false;}
+function publishVideo(){window.posts++;window.sentVisibility=document.querySelector('#visibility').value;window.sentDeclaration=document.querySelector('#declaration').textContent;document.querySelector('${outcome==='success'?'#success':'#failure'}').hidden=false;}
 </script>`;
 async function setup(t,handler){
   const dir=mkdtempSync(join(tmpdir(),'matrix-creators-test-'));
@@ -31,8 +31,8 @@ async function setup(t,handler){
   const origin=`http://127.0.0.1:${studio.server.address().port}`;
   const state=()=>fetch(origin+'/api/state').then(r=>r.json()),token=(await state()).token;
   const post=async(path,body)=>{const r=await fetch(origin+'/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Studio-Token':token},body:JSON.stringify(body)});return {status:r.status,body:await r.json()};};
-  const upload=async(name,mime)=>{
-    const r=await fetch(origin+'/api/assets',{method:'POST',headers:{'X-Studio-Token':token,'X-File-Name':encodeURIComponent(name),'Content-Type':mime},body:Buffer.from('fixture media')});return (await r.json()).id;
+  const upload=async(name,mime,bytes=Buffer.from('fixture media'))=>{
+    const r=await fetch(origin+'/api/assets',{method:'POST',headers:{'X-Studio-Token':token,'X-File-Name':encodeURIComponent(name),'Content-Type':mime},body:bytes});return (await r.json()).id;
   };
   return {runtime,studio,post,state,upload};
 }
@@ -119,6 +119,48 @@ for(const aiAssisted of [true,false])test('抖音静默视频发布、异步编�
   assert.equal(job.receipt.aiDisclosure.checked,aiAssisted?true:null);assert.equal(job.receipt.id,null);assert.equal(job.receipt.simulated,false);
   assert.equal(await session.page.locator('#advanced').getAttribute('aria-expanded'),aiAssisted?'true':'false');
 });
+test('抖音仅自己可见自动发布：准备阶段设置、提交前读回、回执记录，且只提交一次',async t=>{
+  const app=await setup(t,route=>route.fulfill({contentType:'text/html; charset=utf-8',body:douyinHtml()}));
+  const a=await douyinTask(app,'douyin-private',{mode:'auto',aiAssisted:false,silent:true,douyinVisibility:'private'});
+  const job=await waitJob(app,['submitted','needs_manual','unknown']);assert.equal(job.state,'submitted',JSON.stringify(job.events));
+  assert.equal(job.content.publication.douyinVisibility,'private');assert.deepEqual(job.receipt.visibility,{state:'verified',value:'private'});
+  assert.equal(await app.runtime.sessions.get(a).page.evaluate(()=>window.sentVisibility),'private');assert.equal(job.usedAttempts,1);
+});
+
+test('抖音真实checkbox可见范围结构贯穿准备及最终复核，只提交所选仅自己可见',async t=>{
+  const row=readFileSync(new URL('./fixtures/douyin-saved-visibility.html',import.meta.url),'utf8').replace(/<!doctype html>|<meta[^>]*>/g,'');
+  const html=douyinHtml().replace(/<div><span>谁可以看<\/span><select id="visibility">[\s\S]*?<\/select><\/div>/,row)
+    .replace("document.querySelector('#visibility').value",`document.querySelector('label[data-checked="true"] input').value`)+`<style>.radio-native-p6VBGt{position:absolute;opacity:0;width:0;height:0}label.radio-d4zkru{display:inline-block;padding:8px}</style><script>document.addEventListener('click',e=>{const l=e.target.closest('label.radio-d4zkru');if(!l)return;e.preventDefault();const v=l.querySelector('input').value;l.closest('.content-obt4oA').querySelectorAll('label').forEach(n=>{n.querySelector('input').checked=n.querySelector('input').value===v;n.dataset.checked=String(n.querySelector('input').checked);});});</script>`;
+  const app=await setup(t,route=>route.fulfill({contentType:'text/html; charset=utf-8',body:html}));
+  const a=await douyinTask(app,'douyin-real-checkbox',{mode:'manual',aiAssisted:false,douyinVisibility:'private'});
+  const job=await waitJob(app,['awaiting_confirmation','needs_manual']);assert.equal(job.state,'awaiting_confirmation',JSON.stringify(job.events));const page=app.runtime.sessions.get(a).page;
+  assert.equal(await page.locator('input[value="1"]').isChecked(),true);assert.equal(await page.locator('input[value="2"]').isChecked(),false);assert.equal(await page.evaluate(()=>window.posts),0);
+  await app.post('jobs/'+job.id+'/confirm',{confirmReal:true});const result=(await app.state()).jobs[0];assert.equal(result.state,'submitted',JSON.stringify(result.events));assert.equal(await page.evaluate(()=>window.sentVisibility),'1');assert.equal(result.usedAttempts,1);assert.deepEqual(result.receipt.visibility,{state:'verified',value:'private'});
+});
+
+test('抖音任务模板的可见范围随运行和成品快照进入自动发布',async t=>{
+  const app=await setup(t,route=>route.fulfill({contentType:'text/html; charset=utf-8',body:douyinHtml()}));
+  const account=(await app.post('accounts',{platform:'douyin',name:'任务私密视频'})).body.id;
+  await app.post('accounts/'+account+'/open',{});await app.post('accounts/'+account+'/check',{});
+  const asset=await app.upload('任务原视频.mp4','video/mp4');
+  const spec={taskMode:'direct',topic:'任务私密视频',style:'',facts:'私密视频配文',targets:[{accountId:account,type:'video'}],assetIds:[asset],mode:'auto',maxCalls:0,douyinVisibility:'private'};
+  const template=await app.post('task-templates',{enabled:true,spec});assert.equal(template.status,201,JSON.stringify(template));
+  const run=await app.post('task-templates/'+template.body.id+'/run',{requestKey:'private-template'});assert.ok(run.status<300,JSON.stringify(run));
+  const job=await waitJob(app,['submitted','needs_manual','unknown']);assert.equal(job.state,'submitted',JSON.stringify(job.events));
+  assert.equal(job.content.publication.douyinVisibility,'private');assert.equal(await app.runtime.sessions.get(account).page.evaluate(()=>window.sentVisibility),'private');
+  const details=await fetch(`http://127.0.0.1:${app.studio.server.address().port}/api/runs/`+run.body.id).then(r=>r.json());
+  assert.equal(details.snapshot.douyinVisibility,'private');assert.equal(details.targets[0].artifact.publication.douyinVisibility,'private');
+});
+
+test('抖音仅自己可见在人工核对时被改成公开：阻断门禁，不自动改回或提交',async t=>{
+  const app=await setup(t,route=>route.fulfill({contentType:'text/html; charset=utf-8',body:douyinHtml()}));
+  const a=await douyinTask(app,'douyin-private-tamper',{mode:'manual',aiAssisted:false,douyinVisibility:'private'});
+  const job=await waitJob(app,['awaiting_confirmation','needs_manual']);assert.equal(job.state,'awaiting_confirmation');
+  const page=app.runtime.sessions.get(a).page;await page.locator('#visibility').selectOption('public');
+  await app.post('jobs/'+job.id+'/confirm',{confirmReal:true});
+  const result=(await app.state()).jobs[0];assert.equal(result.state,'needs_manual');assert.equal(result.usedAttempts,0);assert.equal(await page.evaluate(()=>window.posts),0);
+});
+
 test('抖音人工发布先暂停，确认前发现文案被改动则阻断，恢复后仅提交一次',async t=>{
   const app=await setup(t,route=>route.fulfill({contentType:'text/html; charset=utf-8',body:douyinHtml()}));
   const a=await douyinTask(app,'douyin-manual',{mode:'manual',aiAssisted:false});const job=await waitJob(app,['awaiting_confirmation','needs_manual']);assert.equal(job.state,'awaiting_confirmation',JSON.stringify(job.events));
@@ -164,4 +206,20 @@ test('新鲜自身身份响应可先于DOM检查使用；不等待无响应的�
  const identity={platformId:'fresh_self',aliases:['fresh_self']};
  assert.equal((await creatorIdentityReady(page,'xhs',()=>identity,Date.now(),{timeoutMs:200})).platformId,'fresh_self');assert.equal(evaluated,false);
  const start=Date.now();assert.equal(await creatorIdentityReady(page,'xhs',()=>null,Date.now(),{timeoutMs:100}),null);assert.ok(Date.now()-start<1500);
+});
+
+test('用户授权 MP4 在受控抖音编辑器上传，校验实际文件大小与单次提交',async t=>{
+  const source=process.env.MATRIX_TEST_VIDEO||'E:/矩阵调研2/抖音测试视频/Dota 2 2026-04-09 11-20-13.mp4';
+  if(!existsSync(source)){t.skip('本机未提供授权上传样例');return;}
+  const bytes=readFileSync(source);
+  const app=await setup(t,route=>route.fulfill({contentType:'text/html; charset=utf-8',body:douyinHtml()}));
+  const a=(await app.post('accounts',{platform:'douyin',name:'受控上传'})).body.id;
+  await app.post('accounts/'+a+'/open',{});await app.post('accounts/'+a+'/check',{});
+  const asset=await app.upload(basename(source),'video/mp4',bytes);
+  await app.post('dispatch',{requestKey:'authorized-mp4',accountIds:[a],content:{type:'video',title:'本机上传测试',body:'受控页面测试',assetIds:[asset],publication:{mode:'auto',aiAssisted:false,silent:true}}});
+  const job=await waitJob(app,['submitted','unknown','needs_manual','needs_login']);
+  assert.equal(job.state,'submitted',JSON.stringify(job.events));
+  const page=app.runtime.sessions.get(a).page;
+  assert.equal(await page.locator('input[type=file]').evaluate(n=>n.files[0].size),bytes.length);
+  assert.equal(await page.evaluate(()=>window.posts),1);
 });

@@ -46,16 +46,19 @@
       "resultTimeoutMs": 45000
     },
     "article": {
-      "url": "https://member.bilibili.com/platform/upload/text/edit",
-      "title": "textarea[placeholder*='标题'], input[placeholder*='标题']",
-      "body": "div[contenteditable='true']",
+      "url": "https://member.bilibili.com/york/read-editor",
+      "flow": "bilibili-article",
+      "title": "textarea.title-input__inner[placeholder*=\"标题\"]",
+      "body": ".editor-container .ProseMirror[contenteditable=\"true\"]",
       "upload": null,
       "submit": null,
       "success": null,
       "publishSteps": [],
       "aiDisclosure": {
         "selector": null
-      }
+      },
+      "readyTimeoutMs": 60000,
+      "resultTimeoutMs": 45000
     }
   },
   "douyin": {
