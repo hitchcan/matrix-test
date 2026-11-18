@@ -1,6 +1,6 @@
 import {attemptsFor,retryDecision} from './retry-evidence.mjs';
 const fault=(reasonCode,message,status=409)=>Object.assign(Error(message),{reasonCode,status});
-export function publicationActions({db,clock,getIntent,getJob,event,hasVerifier,hasModel,canRecover,interrupt}) {
+export function publicationActions({db,clock,getIntent,getJob,event,hasVerifier,hasModel,canRecover,interrupt,isDraft=()=>false}) {
   return function act(id,action,body={}) {
     if(!body || typeof body!=='object' || Array.isArray(body) || Object.keys(body).some(k=>k!=='expectedVersion'))
       throw fault('invalid_input','动作只接受 expectedVersion',422);
@@ -17,6 +17,7 @@ export function publicationActions({db,clock,getIntent,getJob,event,hasVerifier,
         if(!attempts.length && !['cancelled','manually_closed'].includes(job.state))event(id,'cancelled','用户停止了提交前任务。');
         const result=done('stopped');interrupt(id);return result;
       }
+      if(attempts.length&&isDraft(id))throw fault('draft_action_disabled','视频号草稿保存已尝试，请人工核对草稿箱；禁止发表核对或自动重发');
       if(intent.status==='stopped')throw fault('stopped','任务已停止');
       if(['recovering','uploading','submitting','opening_settings'].includes(job.state)||['checking','retry_ready'].includes(intent.status))
         throw fault('owner_busy','当前操作持有任务控制权');

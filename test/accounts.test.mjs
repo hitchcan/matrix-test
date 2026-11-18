@@ -75,3 +75,14 @@ test('添加后自动打开四平台后台，未扫码账号仍可删除；旧�
  await p.reload();await p.locator('#service-update').waitFor({state:'visible'});assert.match(await p.locator('#service-update').innerText(),/重启|重新|Ctrl\+C/);
  await p.locator('[data-account-platform=""]').click();assert.equal(await p.locator('[data-delete-account]:not([disabled])').count(),0);
 });
+
+test('页面与视频号适配器版本不一致时显示后台未更新提示',async t=>{
+ const app=await setup(t);
+ const browser=await chromium.launch({headless:true,channel:process.env.MATRIX_BROWSER_CHANNEL||'chrome'});t.after(()=>browser.close());const p=await browser.newPage();
+ await p.goto(app.origin);await p.locator('#service-update').waitFor({state:'hidden'});
+ assert.ok((await app.state()).capabilities.channelsAdapterRevision);
+ await p.route('**/api/state',async route=>{const r=await route.fetch(),body=await r.json();delete body.capabilities.channelsAdapterRevision;await route.fulfill({response:r,json:body});});
+ await p.reload();await p.locator('#service-update').waitFor({state:'visible'});
+ assert.match(await p.locator('#service-update').innerText(),/视频号.*后台仍运行旧版/);
+ await p.unroute('**/api/state');await p.reload();await p.locator('#service-update').waitFor({state:'hidden'});
+});

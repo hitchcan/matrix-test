@@ -1,7 +1,7 @@
 import { attemptsFor, retryDecision } from './workflow/retry-evidence.mjs';
 import { publicationPolicy } from './workflow/publication-policy.mjs';
 /** Charge the final action before invocation, under the same write lock as its event. */
-export function submissionService(db, event, clock) {
+export function submissionService(db, event, clock, {isDraft=()=>false}={}) {
   db.exec('BEGIN IMMEDIATE');
   try {
     db.exec('CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
@@ -104,7 +104,10 @@ export function submissionService(db, event, clock) {
         .run(jobId, ordinal, at);
       if (!result.changes) throw Object.assign(new Error('该任务已使用首次提交名额'), { status: 409, state: 'unknown' });
 
-      const { verification } = JSON.parse(intent.policy_snapshot);
+      const draft=isDraft(jobId);
+      if(draft&&retrying)throw Error('draft_retry_disabled');
+      const { verification:originalVerification } = JSON.parse(intent.policy_snapshot);
+      const verification=draft?{...originalVerification,enabled:false}:originalVerification;
       const invoked = Date.parse(at);
       const due = seconds => verification.enabled ? new Date(invoked + seconds * 1000).toISOString() : null;
       db.prepare('UPDATE publication_intents SET status=?,version=version+1,next_check_at=?,deadline_at=COALESCE(deadline_at,?) WHERE job_id=?')

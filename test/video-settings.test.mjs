@@ -63,6 +63,58 @@ test('万相音频参数及下载隔离：结果下载不携带密钥，拒绝�
   for(const host of ['attacker.example','dashscope-a717.oss-accelerate.aliyuncs.com.attacker.example','other-bucket.oss-accelerate.aliyuncs.com'])await assert.rejects(p.download('https://'+host+'/result.mp4',AbortSignal.timeout(2000)),e=>e.code==='video_download_host');assert.equal(requests.length,3);
 });
 
+test('业务空间旧版万相按模型限制提示词长度，wan3.0 不受影响',async()=>{
+  const requests=[];
+  const request=async(url,options)=>{requests.push({url:String(url),options});
+    if(options?.method==='POST')return {ok:true,json:async()=>({output:{task_id:'task-1'}})};
+    return new Response(Buffer.from([0,0,0,12,...Buffer.from('ftypisom')]));};
+  const legacy=configuredVideoProvider({MATRIX_VIDEO_ENDPOINT:official,MATRIX_VIDEO_MODEL:'wan2.6-t2v',MATRIX_VIDEO_KEY:'k'},request);
+  await legacy.create({prompt:'字'.repeat(3000),aspect_ratio:'16:9'},'id',AbortSignal.timeout(2000));
+  assert.equal(JSON.parse(requests[0].options.body).input.prompt.length,1500);
+  const current=configuredVideoProvider({MATRIX_VIDEO_ENDPOINT:official,MATRIX_VIDEO_MODEL:'wan3.0-video',MATRIX_VIDEO_KEY:'k'},request);
+  await current.create({prompt:'字'.repeat(3000),aspect_ratio:'16:9'},'id',AbortSignal.timeout(2000));
+  assert.equal(JSON.parse(requests[1].options.body).input.prompt.length,3000);
+});
+
+test('Token Plan 视频协议：异步提交、任务查询、结果下载与参数边界',async()=>{
+  const requests=[];const request=async(url,options)=>{requests.push({url:String(url),options});
+    if(options?.method==='POST')return {ok:true,json:async()=>({output:{task_id:'tp-remote',task_status:'PENDING'}})};
+    if(String(url).includes('/tasks/'))return {ok:true,json:async()=>({output:{task_status:'RUNNING'}})};
+    return new Response(Buffer.from([0,0,0,12,...Buffer.from('ftypisom')]));};
+  const endpoint='https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis';
+  const env={MATRIX_VIDEO_PROVIDER:'tokenplan',MATRIX_VIDEO_ENDPOINT:endpoint,MATRIX_VIDEO_MODEL:'happyhorse-1.1-t2v',MATRIX_VIDEO_KEY:'sk-sp-test',MATRIX_VIDEO_DURATION:'5',MATRIX_VIDEO_RESOLUTION:'720P',MATRIX_VIDEO_AUDIO:'1'};
+  const provider=configuredVideoProvider(env,request);
+  const job=await provider.create({prompt:'海边日落，镜头缓慢推近',aspect_ratio:'9:16'},'target-key',AbortSignal.timeout(2000));
+  assert.equal(job.id,'tp-remote');
+  const sent=JSON.parse(requests[0].options.body);
+  assert.equal(sent.model,'happyhorse-1.1-t2v');assert.equal(sent.input.prompt,'海边日落，镜头缓慢推近');
+  assert.deepEqual(sent.parameters,{resolution:'720P',duration:5,ratio:'9:16'});
+  assert.equal(requests[0].options.headers['X-DashScope-Async'],'enable');
+  assert.equal(requests[0].options.headers.Authorization,'Bearer sk-sp-test');
+  const result=await provider.check('tp-remote',AbortSignal.timeout(2000));
+  assert.equal(result.status,'running');assert.equal(String(requests[1].url),'https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1/tasks/tp-remote');
+  await provider.download('https://token-plan-result-bj.oss-cn-beijing.aliyuncs.com/out.mp4',AbortSignal.timeout(2000));
+  assert.equal(requests[2].options.headers,undefined);
+  await assert.rejects(provider.download('https://attacker.example/out.mp4',AbortSignal.timeout(2000)),e=>e.code==='video_download_host');
+  assert.throws(()=>configuredVideoProvider({...env,MATRIX_VIDEO_ENDPOINT:official},request),e=>e.code==='invalid_tokenplan_endpoint');
+  assert.throws(()=>configuredVideoProvider({...env,MATRIX_VIDEO_ENDPOINT:endpoint.replace('cn-beijing','example.com')},request),e=>e.code==='invalid_tokenplan_endpoint');
+  assert.throws(()=>configuredVideoProvider({...env,MATRIX_VIDEO_DURATION:'2'},request),e=>e.code==='invalid_tokenplan_parameters');
+  assert.throws(()=>configuredVideoProvider({...env,MATRIX_VIDEO_DURATION:'16'},request),e=>e.code==='invalid_tokenplan_parameters');
+});
+test('Token Plan 视频配置保存：需要套餐密钥并限制为 3–15 秒',()=>{
+  const db=new DatabaseSync(':memory:');try{
+    const settings=videoSettings(db,{},async()=>{throw Error('不应发请求');});
+    const endpoint='https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis';
+    const tp={...profile,provider:'tokenplan',endpoint,model:'happyhorse-1.1-t2v',key:'sk-sp-private',duration:5};
+    const saved=settings.save({...tp,duration:5});assert.equal(saved.savedId,saved.activeId);assert.equal(saved.configured,true);
+    assert.ok(!JSON.stringify(saved).includes('sk-sp-private'));
+    assert.equal(settings.check(saved.savedId).ok,true);
+    assert.throws(()=>settings.save({...tp,create:true,duration:16}),/3–15/);
+    const noKey=settings.save({...tp,create:true,key:'',clearKey:true});assert.equal(noKey.configured,false);
+  }finally{db.close();}
+});
+
+
 test('下载域名失败保留原远程任务，恢复只查询及下载，不重新生成',async t=>{
   const db=ledger(t);db.exec("INSERT INTO workflow_targets VALUES('target','run')");let creates=0,downloads=0,allow=false;
   const provider={identity:'unchanged',create:async()=>{creates++;return {id:'original-remote'};},check:async()=>({status:'succeeded',video_url:'https://dashscope-a717.oss-accelerate.aliyuncs.com/clip.mp4'}),download:async()=>{downloads++;if(!allow)throw Object.assign(Error(),{code:'video_download_host'});return Buffer.from('original-result');}};

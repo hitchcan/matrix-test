@@ -5,7 +5,7 @@ export function reportContent(output,assets,{requireImages=false,sources=[]}={})
   const byId=new Map(assets.filter(a=>a.mime?.startsWith('image/')).map(a=>[a.id,a]));
   let blocks=output.blocks;
   if(blocks==null){
-    if(typeof output.body!=='string'||!output.body.trim()||output.body.length>100000||!Array.isArray(output.assetIds))throw fail('图文正文无效');
+    if(typeof output.body!=='string'||!output.body.trim()||output.body.length>200000||!Array.isArray(output.assetIds))throw fail('图文正文无效');
     const paragraphs=output.body.split(/\n+/).filter(Boolean).map(text=>({type:'paragraph',text}));
     // Legacy output is also distributed through the story rather than appended as a gallery.
     const ids=[...new Set(output.assetIds)],merged=[];
@@ -31,6 +31,6 @@ export function reportContent(output,assets,{requireImages=false,sources=[]}={})
     if(credit){html.push('<p>'+esc(credit)+'</p>');text.push(credit);}
   }
   for(const source of sources.slice(0,6)){const reference='参考资料 '+source.id+'：'+source.title+'｜'+source.url+(source.date?'｜发布日期：'+source.date:'');html.push('<p>'+esc(reference)+'</p>');text.push(reference);}
-  if(!normalized.some(b=>b.type==='paragraph')||text.join('\n').length>100000||(requireImages&&!ids.length))throw fail('报道需包含正文及所需配图');
+  if(!normalized.some(b=>b.type==='paragraph')||text.join('\n').length>200000||(requireImages&&!ids.length))throw fail('报道需包含正文及所需配图');
   return {title:output.title.trim(),body:text.join('\n'),bodyHtml:html.join(''),assetIds:ids,blocks:normalized};
 }

@@ -1,3 +1,4 @@
+import {visibilityIssues} from '../video-visibility.mjs';
 import {reportContent} from './report-content.mjs';
 import {normalizeSchedule,occurrence} from './task-schedule.mjs';
 import {validArchiveDay} from '../asset-library.mjs';
@@ -108,6 +109,7 @@ export function macroWorkflow({db,clock,writer,videoProfileId=()=>null,imageText
       }
     }
     if(!['auto','manual'].includes(input.mode)) throw error('请指定发布方式');
+    if(visibilityIssues(input.videoVisibility).length)throw error('视频可见范围无效');
     if(input.douyinVisibility!=null && !['public','private'].includes(input.douyinVisibility))throw error('抖音可见范围无效');
     for(const flag of ['editorialReview','reviewBeforePublish','webResearch'])if(input[flag]!==undefined&&typeof input[flag]!=='boolean')throw error('审稿选项无效');
     const search=input.imageSearch??{};
@@ -118,9 +120,10 @@ export function macroWorkflow({db,clock,writer,videoProfileId=()=>null,imageText
     if(input.useImageText!==undefined && typeof input.useImageText!=='boolean')throw error('图片文字选项无效');
     if(input.noteCard!==undefined && typeof input.noteCard!=='boolean')throw error('图文首图选项无效');
     if(input.videoAspect!==undefined && !['portrait','landscape'].includes(input.videoAspect))throw error('视频比例无效');
+    if(input.shareVideo!==undefined && typeof input.shareVideo!=='boolean')throw error('共用视频选项无效');
     if(taskMode==='direct' && !assetIds.length)throw error('直接发布请选择素材');
     if(taskMode==='direct' && targets.some(t=>!assetIds.some(id=>db.prepare('SELECT mime FROM assets WHERE id=?').get(id).mime.startsWith(t.type==='video'?'video/':'image/'))))throw error('视频目标请选择视频，文章与图文目标请选择图片');
-    return {douyinVisibility:input.douyinVisibility??null,webResearch:taskMode==='generate'&&input.webResearch===true,maxSearchRequests:integer(input.maxSearchRequests??4,1,8,'检索请求次数上限'),editorialReview:input.editorialReview!==false,reviewBeforePublish:input.reviewBeforePublish===true,imageSearch,videoModelId:input.videoModelId||null,taskMode,assetRange:taskMode==='select'?{from:assetRange.from,to:assetRange.to}:null,topic,style,facts,targets,assetIds,sourceMode:input.sourceMode||'description',generationModelId:input.generationModelId||null,assetNotes,videoAspect:input.videoAspect||'portrait',noteCard:input.noteCard===true,useImageText:input.useImageText===true,mode:input.mode,publicationPolicy:publicationPolicy(input.publicationPolicy),
+    return {videoVisibility:input.videoVisibility?{...input.videoVisibility}:null,douyinVisibility:input.douyinVisibility??null,shareVideo:input.shareVideo===true,webResearch:taskMode==='generate'&&input.webResearch===true,maxSearchRequests:integer(input.maxSearchRequests??4,1,8,'检索请求次数上限'),editorialReview:input.editorialReview!==false,reviewBeforePublish:input.reviewBeforePublish===true,imageSearch,videoModelId:input.videoModelId||null,taskMode,assetRange:taskMode==='select'?{from:assetRange.from,to:assetRange.to}:null,topic,style,facts,targets,assetIds,sourceMode:input.sourceMode||'description',generationModelId:input.generationModelId||null,assetNotes,videoAspect:input.videoAspect||'portrait',noteCard:input.noteCard===true,useImageText:input.useImageText===true,mode:input.mode,publicationPolicy:publicationPolicy(input.publicationPolicy),
       assetCooldownSeconds:integer(input.assetCooldownSeconds??0,0,31536000,'素材冷却时间'),
       maxMicros:input.maxMicros==null?null:integer(input.maxMicros,0,1000000000,'每次运行费用上限'),
       maxCalls:integer(input.maxCalls??Math.min(32,targets.reduce((n,t)=>n+(input.generationModelId?(input.editorialReview!==false&&t.type!=='video'?3:2):1)+((imageSearch.enabled||input.webResearch===true)&&t.type!=='video'?1:0)+(input.reviewBeforePublish===true&&t.type!=='video'?1:0),0)),0,32,'每次运行的模型调用上限'),
@@ -135,10 +138,15 @@ export function macroWorkflow({db,clock,writer,videoProfileId=()=>null,imageText
       const priorSpec=prior&&JSON.parse(prior.spec);
       const spec=normalize(priorSpec&&!Object.hasOwn(priorSpec,'editorialReview')&&body.spec?.editorialReview===undefined?{...body.spec,editorialReview:false}:body.spec);
       const sameSchedule=prior && JSON.stringify(JSON.parse(prior.spec).schedule)===JSON.stringify(spec.schedule);
-      const first=occurrence(spec.schedule,Date.parse(spec.schedule.startAt));
+      const start=Date.parse(spec.schedule.startAt);
+      const first=occurrence(spec.schedule,start);
       if(spec.schedule.kind!=='manual' && first===null)throw error('开始与结束日期之间没有可执行的发布时段');
+      // A schedule saved with a start date in the past must wait for its next real
+      // slot instead of immediately backfilling the oldest missed period.
+      const nowMs=Date.parse(clock());
+      const next=occurrence(spec.schedule,Math.max(nowMs,start));
       const version=(prior?.version??0)+1;
-      db.prepare('INSERT OR REPLACE INTO task_templates VALUES(?,?,?,?,?)').run(id,version,+body.enabled,JSON.stringify(spec),sameSchedule?prior.next_at:(first===null?null:iso(first)));
+      db.prepare('INSERT OR REPLACE INTO task_templates VALUES(?,?,?,?,?)').run(id,version,+body.enabled,JSON.stringify(spec),sameSchedule?prior.next_at:(next===null?null:iso(next)));
       return {id,version};
     });
   }
@@ -191,12 +199,67 @@ export function macroWorkflow({db,clock,writer,videoProfileId=()=>null,imageText
       db.prepare('UPDATE task_templates SET next_at=? WHERE id=?').run(next===null?null:iso(next),t.id);
     });
   }
-  const block=(id,reason)=>db.prepare("UPDATE workflow_targets SET state='blocked',reason=?,lease_until=NULL WHERE id=? AND state IN ('pending','generating','card_pending','rendering','ready','awaiting_review','revision_pending','revising')").run(reason,id);
+  const block=(id,reason)=>db.prepare("UPDATE workflow_targets SET state='blocked',reason=?,lease_until=NULL WHERE id=? AND state IN ('pending','waiting_share','generating','card_pending','rendering','ready','awaiting_review','revision_pending','revising')").run(reason,id);
+  // Shared-video mode keeps one generated film per run. The lowest video slot
+  // generates; later video slots adopt its artifact before their own dispatch.
+  function sharedVideo(spec,runId,exceptId) {
+    const rows=db.prepare(`SELECT id,slot,artifact FROM workflow_targets WHERE run_id=? AND id<>? AND artifact IS NOT NULL
+      AND state IN ('ready','dispatched','card_pending','rendering','awaiting_review','revising','revision_pending')`).all(runId,exceptId);
+    for(const row of rows) {
+      if(spec.targets[row.slot]?.type!=='video')continue;
+      let artifact;try{artifact=JSON.parse(row.artifact);}catch{continue;}
+      if(artifact?.generatedVideoId)return artifact;
+    }
+    return null;
+  }
+  // Model output is repaired where the constraint is cosmetic (field length,
+  // stray or unknown asset ids, too many scenes) and rejected only when the
+  // essential content is missing.
+  const sceneTextLimit=300,sceneLimit=16;
+  function repairScenes(output,assets) {
+    if(!Array.isArray(output?.scenes))return {error:'scenes_missing'};
+    const scenes=output.scenes.slice(0,sceneLimit)
+      .filter(scene=>scene&&typeof scene.text==='string'&&scene.text.trim())
+      .map(scene=>{
+        const text=scene.text.trim().slice(0,sceneTextLimit);
+        const assetId=typeof scene.assetId==='string'&&scene.assetId&&assets.some(asset=>asset.id===scene.assetId)?scene.assetId:null;
+        return assetId?{assetId,text}:{text};
+      });
+    if(!scenes.length)return {error:'scenes_empty'};
+    return {scenes,assetIds:[...new Set(scenes.map(scene=>scene.assetId).filter(Boolean))]};
+  }
+  function repairFields(output,target,spec,assets) {
+    if(!output||typeof output!=='object')return {error:'output_not_object'};
+    const title=typeof output.title==='string'?output.title.trim().slice(0,1000):'';
+    if(!title)return {error:'title_missing'};
+    const body=typeof output.body==='string'?output.body.trim().slice(0,200000):'';
+    if(!body)return {error:'body_missing'};
+    const allowed=id=>typeof id==='string'&&assets.some(asset=>asset.id===id&&
+      (target.type==='video'?(spec.taskMode&&spec.taskMode!=='generate'?asset.mime.startsWith('video/'):true):asset.mime.startsWith('image/')));
+    const assetIds=Array.isArray(output.assetIds)?[...new Set(output.assetIds.filter(allowed))]:[];
+    if(target.type==='note'&&!assetIds.length)return {error:'note_without_image'};
+    if(target.type==='video'&&spec.taskMode&&spec.taskMode!=='generate'&&assetIds.length!==1)return {error:'video_selection_count'};
+    return {value:{...output,title,body,assetIds}};
+  }
+  function adoptShared(id,runId,accountId,artifact,now) {    const saved=db.prepare("UPDATE workflow_targets SET artifact=?,state='ready',reason=NULL,lease_until=NULL,review_phase='reviewed',revision=revision+1 WHERE id=? AND state IN ('waiting_share','pending')")
+      .run(JSON.stringify(artifact),id);
+    if(!saved.changes)return false;
+    db.prepare('DELETE FROM asset_usage WHERE target_id=?').run(id);
+    for(const assetId of artifact.assetIds)db.prepare('INSERT OR IGNORE INTO asset_usage VALUES(?,?,?,?)').run(id,accountId,assetId,iso(now));
+    record(id,'共用同一条视频成品');
+    return true;
+  }
   function take(now) {
     return transaction(db,()=>{
       db.prepare("UPDATE workflow_targets SET state='awaiting_review',reason='revision_unknown',lease_until=NULL,revision=revision+1 WHERE state='revising' AND lease_until<=?").run(iso(now));
       db.prepare("UPDATE workflow_targets SET state='blocked',reason='generation_unknown' WHERE state='generating' AND lease_until<=?").run(iso(now));
       db.prepare("UPDATE workflow_targets SET state='card_pending',lease_until=NULL WHERE state='rendering' AND lease_until<=?").run(iso(now));
+      for(const waiting of db.prepare("SELECT t.id,t.run_id,t.slot,r.snapshot FROM workflow_targets t JOIN workflow_runs r ON r.id=t.run_id WHERE t.state='waiting_share'").all()) {
+        const spec=JSON.parse(waiting.snapshot),target=spec.targets[waiting.slot];
+        if(!target)continue;
+        const artifact=sharedVideo(spec,waiting.run_id,waiting.id);
+        if(artifact)adoptShared(waiting.id,waiting.run_id,target.accountId,artifact,now);
+      }
       const row=db.prepare(`SELECT t.*,r.snapshot,r.calls,r.call_micros,r.reserved_micros,r.scheduled_for,r.run_key FROM workflow_targets t JOIN workflow_runs r ON r.id=t.run_id
         WHERE (t.state IN ('pending','card_pending','revision_pending') OR (t.state='ready' AND r.scheduled_for<=?)) AND NOT EXISTS(SELECT 1 FROM video_model_tasks v WHERE v.target_id=t.id AND v.status='pending' AND v.next_at>?) ORDER BY CASE WHEN t.state='ready' THEN 0 ELSE 1 END,r.scheduled_for,t.rowid LIMIT 1`).get(iso(now),iso(now));
       if(!row) return;
@@ -209,6 +272,13 @@ export function macroWorkflow({db,clock,writer,videoProfileId=()=>null,imageText
         block(row.id,'missed_schedule');return;
       }
       if(!accountAvailable(target.accountId)) {block(row.id,'account_unavailable');return;}
+      if(spec.shareVideo===true && target.type==='video' && (!spec.taskMode||spec.taskMode==='generate') && row.state==='pending') {
+        const artifact=sharedVideo(spec,row.run_id,row.id);
+        if(artifact){adoptShared(row.id,row.run_id,target.accountId,artifact,now);return;}
+        const earlier=db.prepare('SELECT id,slot,state FROM workflow_targets WHERE run_id=? AND id<>? AND slot<?').all(row.run_id,row.id,row.slot)
+          .some(s=>spec.targets[s.slot]?.type==='video'&&['pending','generating','card_pending','rendering','revising','revision_pending'].includes(s.state));
+        if(earlier){db.prepare("UPDATE workflow_targets SET state='waiting_share' WHERE id=?").run(row.id);return;}
+      }
       if(row.state==='card_pending') {
         const artifact=JSON.parse(row.artifact),lease=iso(now+(artifact.type==='video'?360000:120000));
         db.prepare("UPDATE workflow_targets SET state='rendering',lease_until=? WHERE id=?").run(lease,row.id);
@@ -249,7 +319,7 @@ export function macroWorkflow({db,clock,writer,videoProfileId=()=>null,imageText
       }
       db.prepare('UPDATE workflow_runs SET calls=calls+?,reserved_micros=reserved_micros+call_micros*? WHERE id=?').run(callCount,callCount,row.run_id);
       db.prepare("UPDATE workflow_targets SET state='generating',lease_until=?,authorized_assets=?,review_phase='planning' WHERE id=?").run(iso(now+240000),JSON.stringify(assets),row.id);
-      return {id:row.id,spec,target,assets,direct};
+      return {id:row.id,runId:row.run_id,lease:iso(now+240000),spec,target,assets,direct};
     });
   }
   let busy=false;
@@ -314,31 +384,35 @@ export function macroWorkflow({db,clock,writer,videoProfileId=()=>null,imageText
         }
         return;
       }
-      let output;
-      try {output=work.direct?{title:spec.topic,body:spec.facts||spec.topic,assetIds:assets.map(a=>a.id)}:await writer({taskMode:spec.taskMode,generationModelId:spec.generationModelId,sourceMode:spec.sourceMode,editorialReview:spec.editorialReview,imageSearch:spec.imageSearch,webResearch:spec.webResearch,topic:spec.topic,style:spec.style,facts:spec.facts,target,assets},{signal,reserveSearchCall:()=>{signal.throwIfAborted();if(isClosed())throw Error('closed');const saved=db.prepare("UPDATE workflow_targets SET search_calls=search_calls+1 WHERE id=? AND state='generating' AND search_calls<?").run(id,spec.maxSearchRequests??4);if(!saved.changes)throw Object.assign(Error('search_request_limit'),{code:'search_request_limit'});},onResearch:sources=>{signal.throwIfAborted();if(isClosed())throw Error('closed');researchSources=sources;db.prepare("UPDATE workflow_targets SET research_sources=? WHERE id=? AND state='generating'").run(JSON.stringify(sources),id);},onAssets:added=>{signal.throwIfAborted();if(isClosed())throw Error('closed');assets.push(...added.filter(a=>!assets.some(b=>b.id===a.id)));db.prepare("UPDATE workflow_targets SET authorized_assets=? WHERE id=? AND state='generating'").run(JSON.stringify(assets),id);},onDraft:draft=>{signal.throwIfAborted();if(isClosed())throw Error('closed');const saved=JSON.stringify({title:draft?.title,body:draft?.body,assetIds:draft?.assetIds,blocks:draft?.blocks});if(saved.length>250000)throw Error('invalid_artifact');db.prepare("UPDATE workflow_targets SET draft=?,review_phase='reviewing' WHERE id=? AND state='generating'").run(saved,id);}});}
-      catch(error) {if(!isClosed()) block(id,['missing_generation_model','same_generation_model','vision_required','source_media_limit','source_media_size','image_search_failed','missing_search_key','search_auth_failed','search_balance_required','search_rate_limited','domestic_search_failed','domestic_search_empty','domestic_search_unconfigured','search_request_limit','search_query_too_long','image_search_empty','invalid_image_queries','invalid_editorial_review'].includes(error.message)?error.message:'generation_unknown');return;}
+      let output,formatRepairUsed=false;
+      try {output=work.direct?{title:spec.topic,body:spec.facts||spec.topic,assetIds:assets.map(a=>a.id)}:await writer({taskMode:spec.taskMode,generationModelId:spec.generationModelId,sourceMode:spec.sourceMode,editorialReview:spec.editorialReview,imageSearch:spec.imageSearch,webResearch:spec.webResearch,topic:spec.topic,style:spec.style,facts:spec.facts,target,assets},{signal,reserveFormatRepair:()=>{signal.throwIfAborted();if(isClosed())throw Error('closed');if(formatRepairUsed)throw Error('model_output_invalid');const updated=db.prepare("UPDATE workflow_runs SET calls=calls+1,reserved_micros=reserved_micros+call_micros WHERE id=? AND calls<? AND (? IS NULL OR (call_micros>0 AND reserved_micros+call_micros<=?)) AND EXISTS(SELECT 1 FROM workflow_targets WHERE id=? AND state='generating' AND lease_until=?)").run(work.runId||db.prepare('SELECT run_id FROM workflow_targets WHERE id=?').get(id).run_id,spec.maxCalls,spec.maxMicros,spec.maxMicros,id,work.lease);if(!updated.changes)throw Error('format_repair_budget');formatRepairUsed=true;},reserveSearchCall:()=>{signal.throwIfAborted();if(isClosed())throw Error('closed');const saved=db.prepare("UPDATE workflow_targets SET search_calls=search_calls+1 WHERE id=? AND state='generating' AND search_calls<?").run(id,spec.maxSearchRequests??4);if(!saved.changes)throw Object.assign(Error('search_request_limit'),{code:'search_request_limit'});},onResearch:sources=>{signal.throwIfAborted();if(isClosed())throw Error('closed');researchSources=sources;db.prepare("UPDATE workflow_targets SET research_sources=? WHERE id=? AND state='generating'").run(JSON.stringify(sources),id);},onAssets:added=>{signal.throwIfAborted();if(isClosed())throw Error('closed');assets.push(...added.filter(a=>!assets.some(b=>b.id===a.id)));db.prepare("UPDATE workflow_targets SET authorized_assets=? WHERE id=? AND state='generating'").run(JSON.stringify(assets),id);},onDraft:draft=>{signal.throwIfAborted();if(isClosed())throw Error('closed');const saved=JSON.stringify({title:draft?.title,body:draft?.body,assetIds:draft?.assetIds,blocks:draft?.blocks});if(saved.length>250000)throw Error('invalid_artifact');db.prepare("UPDATE workflow_targets SET draft=?,review_phase='reviewing' WHERE id=? AND state='generating'").run(saved,id);}});}
+      catch(error) {if(!isClosed()) block(id,['model_output_invalid','model_output_empty','model_output_truncated','model_output_refused','model_response_invalid','model_auth_failed','model_balance_required','model_access_denied','model_rate_limited','model_unavailable','format_repair_budget','missing_generation_model','same_generation_model','vision_required','source_media_limit','source_media_size','image_search_failed','missing_search_key','search_auth_failed','search_balance_required','search_rate_limited','domestic_search_failed','domestic_search_empty','domestic_search_unconfigured','search_request_limit','search_query_too_long','image_search_empty','invalid_image_queries','invalid_editorial_review'].includes(error.message)?error.message:'generation_unknown');return;}
       if(isClosed()) return;
       if(signal.aborted) {block(id,'generation_unknown');return;}
-            if(target.type==='video' && (!spec.taskMode||spec.taskMode==='generate')) {
-        if(!Array.isArray(output?.scenes)||!output.scenes.length||output.scenes.length>8 ||
-            output.scenes.some(s=>(s.assetId!=null && !assets.some(a=>a.id===s.assetId))||typeof s.text!=='string'||!s.text.trim()||s.text.length>80)) {
-          block(id,'invalid_artifact');return;
-        }
-        output.assetIds=[...new Set(output.scenes.map(s=>s.assetId).filter(Boolean))];
+            const reject=detail=>{
+        try{console.error(`[稿件校验] ${target.platform}/${target.accountId} 主题=${String(spec.topic).slice(0,40)} 类型=${target.type} 原因=${detail}`+
+          ` 标题=${typeof output?.title==='string'?output.title.length+'字':'非字符串'}`+
+          ` 正文=${typeof output?.body==='string'?output.body.length+'字':'非字符串'}`+
+          ` 场景=${Array.isArray(output?.scenes)?output.scenes.length+'个':'无'} 素材=${assets.length}`);}catch{}
+        block(id,'invalid_artifact');
+      };
+      if(target.type==='video' && (!spec.taskMode||spec.taskMode==='generate')) {
+        const scenes=repairScenes(output,assets);
+        if(scenes.error)return reject(scenes.error);
+        output={...output,scenes:scenes.scenes,assetIds:scenes.assetIds};
       }
-      if(target.type!=='video'){try{output={...output,...reportContent(output,assets,{requireImages:target.type==='note'||spec.imageSearch?.enabled,sources:researchSources})};}catch{block(id,'invalid_artifact');return;}}
-      if(typeof output?.title!=='string'||!output.title.trim()||output.title.length>500 ||
-          typeof output.body!=='string'||!output.body.trim()||output.body.length>100000 ||
-          !Array.isArray(output.assetIds)||output.assetIds.some(id=>!assets.some(a=>a.id===id && (target.type==='video'?(spec.taskMode&&spec.taskMode!=='generate'?a.mime.startsWith('video/'):true):a.mime.startsWith('image/')))) ||
-          (target.type==='note'&&!output.assetIds.length) || (target.type==='video'&&spec.taskMode&&spec.taskMode!=='generate'&&output.assetIds.length!==1)) {block(id,'invalid_artifact');return;}
+      if(target.type!=='video'){try{output={...output,...reportContent(output,assets,{requireImages:target.type==='note'||spec.imageSearch?.enabled,sources:researchSources})};}catch{return reject('report_content');}}
+      const repaired=repairFields(output,target,spec,assets);
+      if(repaired.error)return reject(repaired.error);
+      output=repaired.value;
       const artifact={type:target.type,title:output.title.trim(),body:output.body.trim(),assetIds:[...new Set(output.assetIds)],
-        publication:{mode:spec.mode,aiAssisted:!work.direct,silent:true,...(target.platform==='douyin'&&spec.douyinVisibility?{douyinVisibility:spec.douyinVisibility}:{})}};
+        publication:{...(target.type==='video'&&spec.videoVisibility?.[target.platform]?{videoVisibility:{[target.platform]:spec.videoVisibility[target.platform]}}:{}),mode:spec.mode,aiAssisted:!work.direct,silent:true,...(target.platform==='douyin'&&spec.douyinVisibility?{douyinVisibility:spec.douyinVisibility}:{})}};
       if(target.type!=='video')Object.assign(artifact,{researchSources,blocks:output.blocks,bodyHtml:output.bodyHtml,reviewNotes:typeof output.reviewNotes==='string'?output.reviewNotes:'',agentModelId:output.agentModelId});
       if(output.generationPrompt)Object.assign(artifact,{generationPrompt:output.generationPrompt,agentModelId:output.agentModelId,generationModelId:output.generationModelId});
       if(target.type==='video'&&(!spec.taskMode||spec.taskMode==='generate')){
-        if(output.videoPrompt!=null&&(typeof output.videoPrompt!=='string'||!output.videoPrompt.trim()||output.videoPrompt.length>10000)){block(id,'invalid_artifact');return;}
+        const prompt=typeof output.videoPrompt==='string'?output.videoPrompt.trim().slice(0,20000):'';
         artifact.scenes=output.scenes.map(s=>({assetId:s.assetId,text:s.text.trim()}));
-        artifact.videoPrompt=output.videoPrompt?.trim()||artifact.scenes.map(s=>s.text).join('\n');
+        artifact.videoPrompt=prompt||artifact.scenes.map(s=>s.text).join('\n');
       }
       transaction(db,()=>{
         const at=clock();
@@ -362,7 +436,7 @@ export function macroWorkflow({db,clock,writer,videoProfileId=()=>null,imageText
   }
   function referenced(field,value) {
     if(field==='asset' && db.prepare("SELECT 1 FROM workflow_targets t,json_each(t.authorized_assets) a WHERE t.state IN ('generating','awaiting_review','revision_pending','revising','ready','blocked','card_pending','rendering') AND json_extract(a.value,'$.id')=? LIMIT 1").get(value))return true;
-    if(field==='asset' && db.prepare("SELECT 1 FROM workflow_targets WHERE state IN ('ready','blocked') AND json_extract(artifact,'$.generatedCoverId')=?").get(value))return true;
+    if(field==='asset' && db.prepare("SELECT 1 FROM workflow_targets WHERE state IN ('ready','blocked') AND (json_extract(artifact,'$.generatedCoverId')=? OR json_extract(artifact,'$.generatedVideoId')=?)").get(value,value))return true;
     const match=s=>field==='account'?s.targets.some(t=>t.accountId===value):s.assetIds.includes(value);
     const specs=db.prepare(`SELECT spec FROM task_templates WHERE enabled=1 UNION SELECT snapshot AS spec FROM workflow_runs r
       WHERE EXISTS(SELECT 1 FROM workflow_targets t WHERE t.run_id=r.id AND t.state IN ('pending','generating','card_pending','rendering','ready','awaiting_review','revision_pending','revising'))`).all();
@@ -370,14 +444,14 @@ export function macroWorkflow({db,clock,writer,videoProfileId=()=>null,imageText
   }
   function stopRun(id) {
     details(id);
-    db.prepare("UPDATE workflow_targets SET state='cancelled' WHERE run_id=? AND state IN ('pending','generating','card_pending','rendering','ready','awaiting_review','revision_pending','revising','blocked')").run(id);
+    db.prepare("UPDATE workflow_targets SET state='cancelled' WHERE run_id=? AND state IN ('pending','waiting_share','generating','card_pending','rendering','ready','awaiting_review','revision_pending','revising','blocked')").run(id);
     if(active && db.prepare("SELECT 1 FROM workflow_targets WHERE id=? AND run_id=? AND state='cancelled'").get(active.id,id))
       active.controller.abort();
     return details(id);
   }
   function resumeTarget(id,targetId) {
     const target=db.prepare('SELECT * FROM workflow_targets WHERE id=? AND run_id=?').get(targetId,id);
-    if(!target || target.state!=='blocked' || !['missing_generation_model','same_generation_model','vision_required','source_media_limit','source_media_size','missing_model','missing_search_key','domestic_search_unconfigured','account_unavailable','dispatch_validation','insufficient_assets','image_text_failed','card_render_failed','missing_video_model','video_provider_changed','video_call_limit','video_budget_unconfigured','video_provider_failed','video_download_host','video_download_failed','video_too_large','invalid_video_output'].includes(target.reason))
+    if(!target || target.state!=='blocked' || !['model_output_invalid','model_output_empty','model_output_truncated','model_output_refused','model_response_invalid','model_auth_failed','model_balance_required','model_access_denied','model_rate_limited','model_unavailable','format_repair_budget','missing_generation_model','same_generation_model','vision_required','source_media_limit','source_media_size','missing_model','missing_search_key','domestic_search_unconfigured','account_unavailable','dispatch_validation','insufficient_assets','image_text_failed','card_render_failed','missing_video_model','video_provider_changed','video_call_limit','video_budget_unconfigured','video_provider_failed','video_download_host','video_download_failed','video_too_large','invalid_video_output','invalid_artifact'].includes(target.reason))
       throw error('该目标不能安全重试',409);
     if(!target.artifact && JSON.parse(db.prepare('SELECT snapshot FROM workflow_runs WHERE id=?').get(id).snapshot).taskMode!=='direct' && (!writer || writer.available===false)) throw error('生成模型未配置',409);
     const artifact=target.artifact && JSON.parse(target.artifact);

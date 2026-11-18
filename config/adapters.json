@@ -104,5 +104,33 @@
         "selector": null
       }
     }
+  },
+  "kuaishou": {
+    "video": {
+      "flow": "kuaishou",
+      "url": "https://cp.kuaishou.com/article/publish/video",
+      "upload": "input[type=\"file\"][accept*=\"video\"]",
+      "title": null,
+      "body": "#work-description-edit[contenteditable=\"true\"]",
+      "submit": null,
+      "success": null,
+      "aiDisclosure": {
+        "selector": null
+      },
+      "readyTimeoutMs": 30000,
+      "editorTimeoutMs": 180000,
+      "resultTimeoutMs": 45000
+    }
+  },
+  "channels": {
+    "video": {
+      "flow": "channels",
+      "url": "https://channels.weixin.qq.com/platform/post/create",
+      "upload": "input[type=\"file\"][accept*=\"video\"]",
+      "title": "input[placeholder=\"填写短标题有机会获得更多流量\"]",
+      "body": ".post-desc-box .input-editor[contenteditable]",
+      "editorTimeoutMs": 180000,
+      "resultTimeoutMs": 45000
+    }
   }
 }

@@ -132,3 +132,20 @@ test('万相 3.0 适配异步头、官方请求结构和任务查询，模型配
   const changed=configuredVideoProvider({MATRIX_VIDEO_ENDPOINT:'https://workspace.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis',MATRIX_VIDEO_MODEL:'other-video-model'},request);
   assert.notEqual(provider.identity,changed.identity);
 });
+
+
+test('模型JSON解析支持完整代码围栏，格式修复须先预留名额且最多一次',async()=>{
+  const env={MATRIX_MODEL_ENDPOINT:'https://model.example/chat',MATRIX_MODEL_NAME:'fixture'};let calls=0,reserved=0;
+  const make=responses=>configuredWriter(env,async(u,o)=>{calls++;if(calls===2){assert.equal(reserved,1);assert.match(JSON.parse(o.body).messages.at(-1).content,/只修正JSON/);}return {ok:true,json:async()=>({choices:[{finish_reason:'stop',message:{content:responses.shift()}}]})};});
+  const value=await make(['{"ok":Threading: true}','{"ok":true}'])({}, {reserveFormatRepair:()=>{reserved++;}});assert.deepEqual(value,{ok:true});assert.equal(calls,2);
+  calls=0;reserved=0;await assert.rejects(make(['broken','still broken'])({}, {reserveFormatRepair:()=>{reserved++;}}),e=>e.code==='model_output_invalid');assert.equal(calls,2);assert.equal(reserved,1);
+  calls=0;await assert.rejects(make(['broken'])({},{}),e=>e.code==='model_output_invalid');assert.equal(calls,1);
+  calls=0;assert.deepEqual(await make(['```json\n{"ok":true}\n```'])({},{}),{ok:true});assert.equal(calls,1);
+});
+
+test('模型截断、拒绝和鉴权错误明确分类，不自动重发；停止后不启动修复',async()=>{
+  const env={MATRIX_MODEL_ENDPOINT:'https://model.example/chat',MATRIX_MODEL_NAME:'fixture'};
+  for(const [finish,code] of [['length','model_output_truncated'],['content_filter','model_output_refused']]){let repair=0;const w=configuredWriter(env,async()=>({ok:true,json:async()=>({choices:[{finish_reason:finish,message:{content:'{'}}]})}));await assert.rejects(w({}, {reserveFormatRepair:()=>{repair++;}}),e=>e.code===code);assert.equal(repair,0);}
+  const denied=configuredWriter(env,async()=>({ok:false,status:401}));await assert.rejects(denied({},{}),e=>e.code==='model_auth_failed');
+  const controller=new AbortController();let calls=0;const w=configuredWriter(env,async()=>{calls++;controller.abort();return {ok:true,json:async()=>({choices:[{message:{content:'bad'}}]})};});await assert.rejects(w({}, {signal:controller.signal,reserveFormatRepair:()=>{throw Error('must not reserve');}}));assert.equal(calls,1);
+});

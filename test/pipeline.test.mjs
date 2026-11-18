@@ -37,6 +37,19 @@ async function setup(t, browserRuntime, publishAdapter, options = {}) {
 }
 const content = { type:'article', title:'一次创作', body:'完整内容', assetIds:[], versions:{bilibili:{title:'B站专属标题'}} };
 
+test('声明状态无法确认时停止自动恢复重放，并保留具体原因',async t=>{
+  let prepares=0,observed=0;
+  const runtime={open:async()=>({}),check:async()=>({platformId:'owner'}),close:async()=>{},observeRecovery:async()=>{observed++;throw Error('不应进入恢复');}};
+  const adapter={prepare:async()=>{prepares++;throw Object.assign(Error('视频号：声明显示值与选中标记不一致（菜单=打开）'),{state:'needs_manual',code:'channels_declaration_state',noAutoRecovery:true});},submit:async()=>{throw Error('不应提交');}};
+  const app=await setup(t,runtime,adapter,{model:async()=>({action:'revalidate'})});
+  const account=(await app.request('accounts',{platform:'zhihu',name:'声明失败受控账号'})).body.id;
+  await app.request('accounts/'+account+'/check',{});
+  await app.request('dispatch',{content,accountIds:[account],requestKey:'declaration-no-replay'});
+  const job=await waitFor(async()=>{const j=(await app.state()).jobs[0];return j?.state==='needs_manual'?j:null;});
+  assert.equal(prepares,1);assert.equal(observed,0);assert.equal(job.usedAttempts,0);assert.ok(!job.events.some(e=>e.state==='recovering'));
+  assert.match(job.events.at(-1).message,/声明显示值与选中标记不一致/);
+});
+
 for(const scenario of ['complete','stop'])test('任务目标坐标恢复经服务端快照、视觉模型、标准复核及原提交门禁：'+scenario,async t=>{
   const {chromium}=await import('playwright'),{observeRecovery}=await import('../workflow/recovery-page.mjs'),{observeVisualRecovery}=await import('../workflow/visual-recovery.mjs');
   const browser=await chromium.launch({channel:'chrome',headless:true});t.after(()=>browser.close());const page=await browser.newPage();

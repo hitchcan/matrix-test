@@ -8,17 +8,28 @@ function endpoint(value,download=false) {
 }
 // A provider adapter or local gateway implements POST jobs and GET jobs/{id}.
 // Actual provider-specific schemas are adapted outside the workflow ledger.
+// wan3 (workspace DashScope) and tokenplan (Token Plan subscription) share the
+// same DashScope async video protocol, but differ in host, duration range and
+// accepted parameters.
+const VIDEO_PATH='/api/v1/services/aigc/video-generation/video-synthesis';
+const ASYNC_PROTOCOLS={wan3:{minDuration:2,maxDuration:30},tokenplan:{minDuration:3,maxDuration:15}};
+const tokenPlanHost=/^token-plan\.[a-z0-9-]+\.maas\.aliyuncs\.com$/;
 export function configuredVideoProvider(env=process.env,request=fetch) {
   if(!env.MATRIX_VIDEO_ENDPOINT)return null;
   const url=endpoint(env.MATRIX_VIDEO_ENDPOINT);
-  const wan=(env.MATRIX_VIDEO_PROVIDER||'wan3')==='wan3';
-  if(!wan && env.MATRIX_VIDEO_PROVIDER!=='json')throw fault('unsupported_video_provider');
-  const model=env.MATRIX_VIDEO_MODEL||(wan?'wan3.0-video':null);
+  const protocol=env.MATRIX_VIDEO_PROVIDER||'wan3';
+  const limits=ASYNC_PROTOCOLS[protocol],asyncVideo=!!limits;
+  if(!asyncVideo && protocol!=='json')throw fault('unsupported_video_provider');
+  const model=env.MATRIX_VIDEO_MODEL||(asyncVideo?'wan3.0-video':null);
   if(!model)throw fault('missing_video_model');
-  if(wan && (url.protocol!=='https:'||!url.hostname.endsWith('.maas.aliyuncs.com') ||
-    url.pathname!=='/api/v1/services/aigc/video-generation/video-synthesis'))throw fault('invalid_wan_endpoint');
+  if(asyncVideo) {
+    if(url.protocol!=='https:'||url.pathname!==VIDEO_PATH)throw fault(protocol==='tokenplan'?'invalid_tokenplan_endpoint':'invalid_wan_endpoint');
+    if(protocol==='wan3'&&!url.hostname.endsWith('.maas.aliyuncs.com'))throw fault('invalid_wan_endpoint');
+    if(protocol==='tokenplan'&&!tokenPlanHost.test(url.hostname))throw fault('invalid_tokenplan_endpoint');
+  }
   const duration=Number(env.MATRIX_VIDEO_DURATION??5),resolution=env.MATRIX_VIDEO_RESOLUTION||'720P',audio=env.MATRIX_VIDEO_AUDIO!=='0';
-  if(wan && (!Number.isInteger(duration)||duration<2||duration>30||!['480P','720P','1080P'].includes(resolution)))throw fault('invalid_wan_parameters');
+  if(asyncVideo && (!Number.isInteger(duration)||duration<limits.minDuration||duration>limits.maxDuration||!['480P','720P','1080P'].includes(resolution)))
+    throw fault(protocol==='tokenplan'?'invalid_tokenplan_parameters':'invalid_wan_parameters');
   const headers={'Content-Type':'application/json',...(env.MATRIX_VIDEO_KEY?{Authorization:'Bearer '+env.MATRIX_VIDEO_KEY}:{})};
   async function json(target,options) {
     const response=await request(target,{...options,headers:options.headers||headers,redirect:'error'});
@@ -26,23 +37,35 @@ export function configuredVideoProvider(env=process.env,request=fetch) {
     return response.json();
   }
   return {
-    identity:createHash('sha256').update(JSON.stringify([wan,url.href,model,duration,resolution,...(audio?[]:[false])])).digest('hex'),
+    identity:createHash('sha256').update(JSON.stringify(protocol==='wan3'
+      ?[true,url.href,model,duration,resolution,...(audio?[]:[false])]
+      :[protocol,url.href,model,duration,resolution])).digest('hex'),
     create:async(prompt,key,signal)=>{
-      const body=wan?{model,input:{prompt:prompt.prompt},parameters:{resolution,duration,ratio:prompt.aspect_ratio,audio}}:{model,request_id:key,...prompt,duration,resolution,audio};
-      const result=await json(url,{method:'POST',signal,headers:wan?{...headers,'X-DashScope-Async':'enable'}:headers,body:JSON.stringify(body)});
-      return wan?{id:result.output?.task_id}:result;
+      const parameters={resolution,duration,ratio:prompt.aspect_ratio,...(protocol==='wan3'?{audio}:{})};
+      // Legacy Wan 2.5/2.6 text-to-video accepts at most 1500 characters; the
+      // newer wan3.0/video-plan models take longer prompts.
+      const promptLimit=/^wan2\.[56]/i.test(model)?1500:20000;
+      const text=String(prompt.prompt??'').slice(0,promptLimit);
+      const body=asyncVideo?{model,input:{prompt:text},parameters}:{model,request_id:key,...prompt,duration,resolution,audio};
+      const result=await json(url,{method:'POST',signal,headers:asyncVideo?{...headers,'X-DashScope-Async':'enable'}:headers,body:JSON.stringify(body)});
+      return asyncVideo?{id:result.output?.task_id}:result;
     },
     check:async(id,signal)=>{
-      const result=await json(wan?new URL('/api/v1/tasks/'+encodeURIComponent(id),url):new URL(url.href.replace(/\/$/,'')+'/'+encodeURIComponent(id)),{signal});
-      if(!wan)return result;
+      const result=await json(asyncVideo?new URL('/api/v1/tasks/'+encodeURIComponent(id),url):new URL(url.href.replace(/\/$/,'')+'/'+encodeURIComponent(id)),{signal});
+      if(!asyncVideo)return result;
       const status=result.output?.task_status;
       return {status:status==='SUCCEEDED'?'succeeded':['FAILED','CANCELED','UNKNOWN'].includes(status)?'failed':'running',video_url:result.output?.video_url};
     },
     download:async(href,signal)=>{
       const target=endpoint(href,true);
       const allowed=(env.MATRIX_VIDEO_DOWNLOAD_HOSTS||url.hostname).split(',').map(x=>x.trim());
-      const officialResult=wan && (/^dashscope-result-[a-z0-9-]+\.oss-[a-z0-9-]+\.aliyuncs\.com$/.test(target.hostname)||/^dashscope-[a-z0-9-]+\.oss-accelerate\.aliyuncs\.com$/.test(target.hostname));
-      if(!allowed.includes(target.hostname) && !officialResult)throw fault('video_download_host');
+      const dashscopeResult=asyncVideo&&(/^dashscope-result-[a-z0-9-]+\.oss-[a-z0-9-]+\.aliyuncs\.com$/.test(target.hostname)||
+        /^dashscope-[a-z0-9-]+\.oss-accelerate\.aliyuncs\.com$/.test(target.hostname));
+      // Token Plan returns its result from an Alibaba OSS bucket as well; accept
+      // OSS bucket hosts only, and still send no credentials to the download.
+      const tokenPlanResult=protocol==='tokenplan'&&(/^[a-z0-9-]+\.oss-[a-z0-9-]+\.aliyuncs\.com$/.test(target.hostname)||
+        /^[a-z0-9-]+\.oss-accelerate\.aliyuncs\.com$/.test(target.hostname));
+      if(!allowed.includes(target.hostname) && !dashscopeResult && !tokenPlanResult)throw fault('video_download_host');
       const response=await request(target,{signal,redirect:'error'});
       if(!response.ok || Number(response.headers.get('content-length'))>150*1024*1024)throw fault('video_download_failed');
       const chunks=[];let size=0;

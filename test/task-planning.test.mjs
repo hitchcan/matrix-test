@@ -108,3 +108,14 @@ test('区间无可用素材、超过范围上限及越权素材ID不调用发布
   await app.upload('范围内.png');result=await start('outside');assert.equal(result.targets[0].reason,'invalid_artifact');assert.equal(calls,1);assert.equal((await app.api('state')).jobs.length,0);
   for(let i=0;i<100;i++)await app.upload('受控'+i+'.png');result=await start('too-many');assert.equal(result.targets[0].reason,'asset_range_limit');assert.equal(result.calls,0);assert.equal(calls,1);
 });
+
+
+for(const scenario of ['repaired','budget','invalid','cost'])test('生成格式修复沿用运行次数和费用账本：'+scenario,async t=>{
+  const {configuredWriter}=await import('../workflow/model-gateway.mjs');let calls=0;
+  const w=configuredWriter({MATRIX_MODEL_ENDPOINT:'https://model.example/chat',MATRIX_MODEL_NAME:'fixture'},async()=>{calls++;return {ok:true,json:async()=>({choices:[{finish_reason:'stop',message:{content:calls===1||scenario==='invalid'?'invalid-json':JSON.stringify({title:'修复后的稿件',body:'原稿事实',assetIds:[]})}}]})};});
+  const app=await setup(t,{writer:w,writerCallMicros:1});const template=await app.api('task-templates',{enabled:true,spec:{...spec,facts:'原稿事实',maxMicros:scenario==='cost'?1:null,maxCalls:scenario==='budget'?1:2}});const run=await app.api('task-templates/'+template.id+'/run',{requestKey:'repair-'+scenario});
+  const result=await wait(async()=>{const r=await app.api('runs/'+run.id);return ['blocked','dispatched'].includes(r.targets[0].state)&&r;});
+  assert.equal(result.calls,['budget','cost'].includes(scenario)?1:2);assert.equal(result.reserved_micros,result.calls);assert.equal(calls,result.calls);
+  if(scenario==='repaired'){assert.equal(result.targets[0].state,'dispatched');assert.equal(result.targets[0].artifact.title,'修复后的稿件');}else{assert.equal(result.targets[0].reason,['budget','cost'].includes(scenario)?'format_repair_budget':'model_output_invalid');assert.equal((await app.api('state')).jobs.length,0);}
+  await app.restart();assert.equal((await app.api('runs/'+run.id)).calls,result.calls);
+});

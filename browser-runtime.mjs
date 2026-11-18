@@ -1,3 +1,6 @@
+import {videoVisibility} from './video-visibility.mjs';
+import {channelsEditorUrl,channelsField,channelsUpload,channelsAi,channelsPublishButton,channelsSuccessVisible,channelsReceipt,channelsIdentity,channelsHomeIdentity,channelsDocumentIdentity,channelsPageScan,channelsText} from './wechat-channels.mjs';
+import {kuaishouUpload,kuaishouField,kuaishouDescription,kuaishouCheckDescription,kuaishouAi,kuaishouPublishButton,kuaishouSuccessVisible,kuaishouReceipt,watchKuaishouSubmission} from './kuaishou-publisher.mjs';
 import {bilibiliArticleEditorUrl,bilibiliArticleField,bilibiliArticleSettings,bilibiliArticleAi,bilibiliArticlePublishButton,bilibiliArticleSuccessVisible,bilibiliArticleReceipt,pasteBilibiliArticleImages} from './bilibili-article.mjs';
 import { observeRecovery } from './workflow/recovery-page.mjs';
 import {observeVisualRecovery} from './workflow/visual-recovery.mjs';
@@ -39,6 +42,8 @@ function protect(bytes, decrypt = false) {
   return Buffer.from(execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',script], {input:bytes.toString('base64'),windowsHide:true,encoding:'utf8',timeout:10000,maxBuffer:16*1024*1024}).trim(),'base64');
 }
 export const routes = {
+  channels:{home:'https://channels.weixin.qq.com/platform',identity:'[data-matrix-no-identity-fallback]',identityPattern:/^$/,origins:['channels.weixin.qq.com']},
+  kuaishou:{home:'https://cp.kuaishou.com/profile',identity:'.header-info-card a[href*="/profile/"]',identityPattern:/https:\/\/(?:www\.)?kuaishou\.com\/profile\/([A-Za-z0-9_-]+)/,origins:['cp.kuaishou.com']},
   zhihu: { home: 'https://www.zhihu.com/creator', identity: '.AppHeader-userInfo a[href*="zhihu.com/people/"], a.ProfileEntry-link[href*="/people/"]', identityPattern: /https:\/\/(?:www\.)?zhihu\.com\/people\/([^/?#]+)/, origins: ['www.zhihu.com', 'zhuanlan.zhihu.com'] },
   bilibili: { home: 'https://member.bilibili.com/', identity: '.bcc-global-header a[href*="space.bilibili.com/"], .bcc-header a[href*="space.bilibili.com/"], a.header-entry-avatar[href*="space.bilibili.com/"]', identityPattern: /https:\/\/space\.bilibili\.com\/(\d+)/, origins: ['member.bilibili.com'] },
   xhs: { home: 'https://creator.xiaohongshu.com/new/home', identity: '.user-info a[href*="xiaohongshu.com/user/profile/"]', identityPattern: /https:\/\/www\.xiaohongshu\.com\/user\/profile\/([^/?#]+)/, origins: ['creator.xiaohongshu.com'] },
@@ -96,7 +101,23 @@ export class BrowserRuntime {
         context.setDefaultNavigationTimeout(45000);
         session = { context, headless, background:silent&&!headless, page: context.pages()[0] || await context.newPage() };
         if(session.background)try{await this.windowState(session,'minimized');}catch{session.background=false;}
-        session.identityRead=watchCreatorIdentity(session.page,account.platform);
+        // QR login can finish in a second tab, so watch every page of this profile
+        // context instead of only the first one. Each watcher still accepts only
+        // same-origin responses requested by the official page itself.
+        const readers=[];
+        session.probe=[];
+        const attach=page=>{
+          try{readers.push(watchCreatorIdentity(page,account.platform));}catch{}
+          page.on('response',response=>{try{
+            const url=new URL(response.url());
+            if(!routes[account.platform].origins.includes(url.hostname))return;
+            session.probe.push(url.pathname+(url.search?'?'+url.search.slice(1):''));
+            if(session.probe.length>24)session.probe.shift();
+          }catch{}});
+        };
+        attach(session.page);
+        context.on('page',page=>attach(page));
+        session.identityRead=since=>{for(const read of readers){const found=read(since);if(found)return found;}return null;};
         session.cookieFile = join(directory, 'matrix-session.dpapi');
         if (existsSync(session.cookieFile)) {
           try { const cookies = JSON.parse(protect(readFileSync(session.cookieFile),true)); const current = await context.cookies(); await context.addCookies(cookies.filter(c=>(c.expires === -1 || c.expires > Date.now()/1000) && !current.some(x=>x.name===c.name && x.domain===c.domain && x.path===c.path))); }
@@ -158,12 +179,20 @@ export class BrowserRuntime {
     if (preserveEditor){
       try{await page.goto(routes[account.platform].home, {waitUntil:'domcontentloaded',timeout:45000});}
       catch(e){
-        if(!['xhs','douyin'].includes(account.platform))throw e;
+        if(!['xhs','douyin','kuaishou'].includes(account.platform))throw e;
         // Client redirects can abort the original navigation after login succeeds.
         if(!/ERR_ABORTED|interrupted by another navigation|context was destroyed/i.test(e.message))throw browserError('账号检查页面加载未完成'+(e.name==='TimeoutError'?'（网络等待超时）':'（网络或浏览器错误）')+'；这不代表登录已失效，请检查网络后重试。','detecting');
       }
     }
     const route = routes[account.platform];
+    // Chrome restores the last tab before our response watchers are attached, so the
+    // account endpoint may have already answered. Reload at most once a minute.
+    const reloadOnce = async () => {
+      if (preserveEditor) return false;
+      if (session.identityReloadAt && Date.now()-session.identityReloadAt < 60000) return false;
+      session.identityReloadAt = Date.now();
+      try { await page.reload({waitUntil:'domcontentloaded',timeout:45000}); return true; } catch { return false; }
+    };
     if(account.platform==='bilibili'){
       const identity=readIdentity?.(since)||await readBilibiliIdentity(page);
       if(identity){
@@ -172,9 +201,21 @@ export class BrowserRuntime {
         return identity;
       }
     }
+    if(account.platform==='channels'){
+      let identity=await channelsIdentity(readIdentity,since,preserveEditor?10000:1500)||await channelsDocumentIdentity(page).catch(()=>null);
+      if(!identity && await reloadOnce())identity=await channelsIdentity(readIdentity,Date.now()-1000,8000)||await channelsDocumentIdentity(page).catch(()=>null);
+      if(!identity)identity=await channelsHomeIdentity(page).catch(()=>null);
+      if(!identity)throw browserError('视频号本人身份尚未识别，请完成扫码、选择视频号或验证。','detecting');
+      if(account.platform_id&&account.platform_id!==identity.platformId&&!identity.aliases?.includes(account.platform_id))throw browserError('当前视频号与绑定账号不同。','identity_mismatch');
+      identity={...identity,platformId:account.platform_id||identity.platformId};
+      if(session.savedIdentity!==identity.platformId){await session.save();session.savedIdentity=identity.platformId;}
+      return identity;
+    }
     let creatorMismatch=false;
-    if(['xhs','douyin'].includes(account.platform)){
+    if(['xhs','douyin','kuaishou'].includes(account.platform)){
       let identity=await creatorIdentityReady(page,account.platform,readIdentity,since,{timeoutMs:preserveEditor?10000:1500});
+      if(!identity && account.platform==='kuaishou' && await reloadOnce())
+        identity=await creatorIdentityReady(page,'kuaishou',readIdentity,Date.now()-1000,{timeoutMs:8000});
       if(identity){
         if(account.platform_id && account.platform_id!==identity.platformId && !identity.aliases?.includes(account.platform_id)){
           if(identity.aliases)throw browserError('当前浏览器身份与绑定账号不同，请切回原账号。','identity_mismatch');
@@ -217,6 +258,17 @@ export class BrowserRuntime {
     if (session.savedIdentity !== identity.platformId) { await session.save(); session.savedIdentity=identity.platformId; }
     return identity;
   }
+  async diagnoseIdentity(accountId) {
+    const session = this.sessions.get(accountId);
+    if (!session) return null;
+    let url = null;
+    try { url = session.page && !session.page.isClosed() ? session.page.url() : null; } catch {}
+    let hints = null;
+    if (url && /^https:\/\/channels\.weixin\.qq\.com\//.test(url)) {
+      try { hints = await channelsPageScan(session.page); } catch {}
+    }
+    return { url, paths: [...(session.probe || [])].slice(-15), hints };
+  }
   async disconnect(accountId) {
     if (this.opening.has(accountId)) { try { await this.opening.get(accountId); } catch {} }
     const session = this.sessions.get(accountId); if (session) { try { await session.save(); } finally { await session.context.close(); } } this.sessions.delete(accountId);
@@ -238,6 +290,8 @@ export class PublishAdapter {
   async applyAiDisclosure(page,rule,content,{required=true}={}) {
     const {aiAssisted}=publicationOf(content);
     if(aiAssisted===null)return {state:'unchanged',checked:null}; // Older tasks did not specify a declaration.
+    if(rule.flow==='channels')return channelsAi(page,aiAssisted,rule,{verifyOnly:required});
+    if(rule.flow==='kuaishou')return kuaishouAi(page,aiAssisted);
     if(rule.flow==='bilibili-article')return bilibiliArticleAi(page,aiAssisted,{required});
     if(rule.flow==='bilibili-video')return bilibiliAi(page,aiAssisted,{required});
     if(aiAssisted===false&&(rule.flow==='zhihu-article'||URL.canParse(rule.url)&&['www.zhihu.com','zhuanlan.zhihu.com'].includes(new URL(rule.url).hostname))){
@@ -316,10 +370,11 @@ export class PublishAdapter {
     if (rule.upload && media.length) {
       hooks.onProgress?.('上传素材到平台');
       await pace('upload');
-      const input = rule.flow==='bilibili-video'?await bilibiliUpload(page,rule):rule.flow==='douyin'?await douyinUpload(page,rule):rule.flow==='xhs'?await xhsUpload(page,content.type,rule):page.locator(rule.upload); if (await input.count() !== 1) throw browserError('无法唯一定位上传控件，请在浏览器检查当前页面');
+      const input = rule.flow==='channels'?await channelsUpload(page,rule):rule.flow==='kuaishou'?await kuaishouUpload(page,rule):rule.flow==='bilibili-video'?await bilibiliUpload(page,rule):rule.flow==='douyin'?await douyinUpload(page,rule):rule.flow==='xhs'?await xhsUpload(page,content.type,rule):page.locator(rule.upload); if (await input.count() !== 1) throw browserError('无法唯一定位上传控件，请在浏览器检查当前页面');
       const files=rule.flow==='bilibili-video'?bilibiliDiskFiles(media):media.map(a => ({ name: a.name, mimeType: a.mime, buffer: readFileSync(a.path) }));
       await input.setInputFiles(files, { timeout: 30000 });
     }
+    if(rule.flow==='kuaishou'){const field=await kuaishouField(page,rule);await pace('field');await field.fill(kuaishouDescription(content));}
     let html=contentHtml(content,account.platform);
     if(html){
       html=cleanHtml(html).replace(/src="\/media\/([\w-]+)"/g,(_,assetId)=>{
@@ -327,12 +382,12 @@ export class PublishAdapter {
         return 'src="data:'+a.mime+';base64,'+readFileSync(a.path).toString('base64')+'"';
       });
     }
-    for (const [selector, value,rich] of [[rule.title, version.title || content.title,false], [rule.body, version.body || content.body,Boolean(html)]]) {
+    for (const [selector, value,rich] of (rule.flow==='kuaishou'?[]:[[rule.title, version.title || content.title,false], [rule.body, version.body || content.body,Boolean(html)]])) {
       if (!selector) throw browserError('标题/正文定位未配置');
       const kind=selector===rule.title?'title':'body';
       hooks.onProgress?.(kind==='title'?'等待编辑器并填写标题':'填写正文或视频简介');
       await pace('field');
-      const field = rule.flow==='bilibili-article'?await bilibiliArticleField(page,kind,rule):rule.flow==='bilibili-video'?await bilibiliField(page,kind,rule):rule.flow==='douyin'?await douyinField(page,kind,rule):rule.flow==='xhs'?await xhsField(page,kind,rule):page.locator(selector); await field.waitFor({ state: 'visible', timeout: 20000 });
+      const field = rule.flow==='channels'?await channelsField(page,kind,rule):rule.flow==='bilibili-article'?await bilibiliArticleField(page,kind,rule):rule.flow==='bilibili-video'?await bilibiliField(page,kind,rule):rule.flow==='douyin'?await douyinField(page,kind,rule):rule.flow==='xhs'?await xhsField(page,kind,rule):page.locator(selector); await field.waitFor({ state: 'visible', timeout: 20000 });
       if (await field.count() !== 1) throw browserError('字段存在多个匹配，已暂停以避免填错内容');
       if(rule.flow==='bilibili-article'&&kind==='title'){const max=Number(await field.getAttribute('maxlength'));if(max>0&&String(value||'').length>max)throw browserError('B站长文章标题超过编辑器字数限制，请修改稿件后继续。');}
       if(rich){
@@ -351,7 +406,7 @@ export class PublishAdapter {
         }
         await field.page().waitForTimeout(300);
         await assertRich(field,html);
-      }else await field.fill(value || '', { timeout: 15000 });
+      }else await field.fill(rule.flow==='channels'?channelsText(content,kind):(value || ''), { timeout: 15000 });
     }
     for(const selector of rule.publishSteps || []) {
       await pace('settings');
@@ -366,54 +421,63 @@ export class PublishAdapter {
     await pace('settings');
     const aiDisclosure=await this.applyAiDisclosure(page,rule,content,{required:false});
     if(rule.flow==='douyin'){await pace('settings');hooks.onProgress?.('设置抖音视频可见范围');await douyinVisibility(page,content.publication?.douyinVisibility,rule);}
+    if(content.type==='video'&&['bilibili','kuaishou'].includes(account.platform))await videoVisibility(page,account.platform,content.publication?.videoVisibility?.[account.platform]);
     return { page, rule, aiDisclosure };
   }
   async submit(account, content, onClick, hooks={}) {
     const rule = this.rule(account, content);
+    const channels=rule.flow==='channels';
+    const kuaishou=rule.flow==='kuaishou';
     const zhihu=rule.flow==='zhihu-article';
     const xhs=rule.flow==='xhs';
     const douyin=rule.flow==='douyin';
     const biliArticle=rule.flow==='bilibili-article';
     const bili=rule.flow==='bilibili-video';
-    if (!zhihu && !xhs && !douyin && !bili && !biliArticle && (!rule.submit || !rule.success)) throw browserError('尚未配置唯一提交按钮及成功标志，请在官方后台核对或完善适配规则');
+    if (!channels && !kuaishou && !zhihu && !xhs && !douyin && !bili && !biliArticle && (!rule.submit || !rule.success)) throw browserError('尚未配置唯一提交按钮及成功标志，请在官方后台核对或完善适配规则');
     if (account.status !== 'connected' || !account.platform_id) throw browserError('账号连接已停用或未核验', 'needs_login');
     const { page } = await this.runtime.open(account);
     hooks.onProgress?.('提交前节奏等待与身份复核');
     await this.runtime.pace?.(page,'submit',{isActive:hooks.isActive});
     await this.runtime.check(account, true);
-    if (biliArticle?!bilibiliArticleEditorUrl(page.url()):zhihu?!isZhihuEditor(page.url()):bili?!bilibiliEditorUrl(page.url()):douyin?!douyinEditorUrl(page.url()):xhs?!xhsEditorUrl(page.url()):page.url().split('?')[0] !== rule.url.split('?')[0]) throw browserError('发布页面已切换，请人工检查。不会自动重填或提交。');
+    if (channels?!channelsEditorUrl(page.url()):biliArticle?!bilibiliArticleEditorUrl(page.url()):zhihu?!isZhihuEditor(page.url()):bili?!bilibiliEditorUrl(page.url()):douyin?!douyinEditorUrl(page.url()):xhs?!xhsEditorUrl(page.url()):page.url().split('?')[0] !== rule.url.split('?')[0]) throw browserError('发布页面已切换，请人工检查。不会自动重填或提交。');
     if(zhihu)await zhihuPanel(page,rule,{open:false});
     hooks.onProgress?.('核对 AI 创作声明与发布必填项');
     const aiDisclosure=await this.applyAiDisclosure(page,rule,content);
     if(bili){hooks.onProgress?.('核对B站封面');await requireBilibiliCover(page);}
     hooks.onProgress?.('等待平台最终发布按钮可用');
-    const button = biliArticle?await bilibiliArticlePublishButton(page,rule):zhihu?await zhihuFinalButton(page,rule):bili?await bilibiliPublishButton(page,rule):douyin?await douyinPublishButton(page,rule):xhs?await xhsPublishButton(page,rule):page.locator(rule.submit);
+    const button = channels?await channelsPublishButton(page,rule,content):kuaishou?await kuaishouPublishButton(page):biliArticle?await bilibiliArticlePublishButton(page,rule):zhihu?await zhihuFinalButton(page,rule):bili?await bilibiliPublishButton(page,rule):douyin?await douyinPublishButton(page,rule):xhs?await xhsPublishButton(page,rule):page.locator(rule.submit);
     if (await button.count() !== 1 || !await button.isEnabled()) throw browserError('提交按钮不唯一或不可用，请检查必填项');
     // Confirm the fields have not been changed since the immutable task snapshot.
     hooks.onProgress?.('核对待发布文案与任务快照');
     const version = content.versions?.[account.platform] || {};
-    for (const [selector, expected] of [[rule.title, version.title || content.title], [rule.body, version.body || content.body]]) {
+    if(kuaishou)await kuaishouCheckDescription(page,content,rule);
+    for (const [selector, expected] of (kuaishou?[]:[[rule.title, version.title || content.title], [rule.body, version.body || content.body]])) {
       const kind=selector===rule.title?'title':'body';
-      const field = biliArticle?await bilibiliArticleField(page,kind,rule):bili?await bilibiliField(page,kind,rule):douyin?await douyinField(page,kind,rule):xhs?await xhsField(page,kind,rule):page.locator(selector);
+      const field = channels?await channelsField(page,kind,rule):biliArticle?await bilibiliArticleField(page,kind,rule):bili?await bilibiliField(page,kind,rule):douyin?await douyinField(page,kind,rule):xhs?await xhsField(page,kind,rule):page.locator(selector);
       if(selector===rule.body && contentHtml(content,account.platform)){await assertRich(field,cleanHtml(contentHtml(content,account.platform)));continue;}
       const actual = await field.evaluate(n => 'value' in n ? n.value : n.innerText);
       const normalize=s=>s.replace(/\r\n/g,'\n').replace(/\u200b/g,'').replace(/\n+/g,'\n').trim();
-      if ((xhs||douyin||bili?normalize(actual):actual.trim()) !== (xhs||douyin||bili?normalize(expected||''):(expected || '').trim())) throw browserError('页面文案已变化，请核对并恢复任务文案后重试');
+      if ((xhs||douyin||bili?normalize(actual):actual.trim()) !== (xhs||douyin||bili?normalize(channels?channelsText(content,kind):(expected||'')):(channels?channelsText(content,kind):(expected || '')).trim())) throw browserError('页面文案已变化，请核对并恢复任务文案后重试');
     }
-    if ((biliArticle&&await bilibiliArticleSuccessVisible(page)) || (bili && await bilibiliSuccessVisible(page,rule)) || (douyin && await douyinSuccessVisible(page,rule)) || (xhs && await xhsSuccessVisible(page,rule)) || (rule.success && await page.locator(rule.success).isVisible())) throw browserError('提交前已存在成功标志，无法归因本次提交，已暂停');
-    const visibility=douyin?await douyinVisibility(page,content.publication?.douyinVisibility,rule,{verifyOnly:true}):null;
+    if ((channels&&await channelsSuccessVisible(page,content)) || (kuaishou&&await kuaishouSuccessVisible(page)) || (biliArticle&&await bilibiliArticleSuccessVisible(page)) || (bili && await bilibiliSuccessVisible(page,rule)) || (douyin && await douyinSuccessVisible(page,rule)) || (xhs && await xhsSuccessVisible(page,rule)) || (rule.success && await page.locator(rule.success).isVisible())) throw browserError('提交前已存在成功标志，无法归因本次提交，已暂停');
+    const visibility=content.type==='video'&&['bilibili','kuaishou'].includes(account.platform)?await videoVisibility(page,account.platform,content.publication?.videoVisibility?.[account.platform],{verifyOnly:true}):douyin?await douyinVisibility(page,content.publication?.douyinVisibility,rule,{verifyOnly:true}):null;
+    const capture=kuaishou?watchKuaishouSubmission(page):null;
+    try{
     await onClick();
     if(douyin)this.pendingSubmissions.set(account.id,{page,content:JSON.stringify(content)});
 
     await button.click({ timeout: 15000 });
     hooks.onProgress?.('已执行最终提交，等待平台回执');
+    if(channels)return {...await channelsReceipt(page,rule,content),aiDisclosure};
+    if(kuaishou)return {...await kuaishouReceipt(page,rule,capture),aiDisclosure,visibility};
     if(biliArticle)return {...await bilibiliArticleReceipt(page,rule),aiDisclosure};
-    if(bili)return {...await bilibiliReceipt(page,rule),aiDisclosure};
+    if(bili)return {...await bilibiliReceipt(page,rule),aiDisclosure,visibility};
     if(douyin){const receipt={...await douyinReceipt(page,rule),aiDisclosure,visibility};this.pendingSubmissions.delete(account.id);return receipt;}
     if(xhs)return {...await xhsReceipt(page,rule),aiDisclosure};
     if(zhihu)return {simulated:false,submittedAt:new Date().toISOString(),aiDisclosure,...await waitZhihuReceipt(page,rule)};
     await page.locator(rule.success).waitFor({ state: 'visible', timeout: 45000 });
     return { simulated: false, id: null, url: null, submittedAt: new Date().toISOString(), aiDisclosure, evidence: '页面显示已配置的提交成功标志；公开状态未确认' };
+    }finally{capture?.close();}
   }
   async checkResult(account,content){
     if(this.rule(account,content).flow!=='douyin')throw browserError('该平台未开放验证后结果核对。');

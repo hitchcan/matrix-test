@@ -1,3 +1,4 @@
+import {channelsAdapterRevision} from './wechat-channels.mjs';
 import {imageSettings} from './workflow/image-search.mjs';
 import {videoSettings} from './workflow/video-settings.mjs';
 import {modelSettings} from './workflow/model-settings.mjs';
@@ -160,7 +161,8 @@ export function createStudio({ dataDir = join(root, '.data'), tickMs = 1000, dem
     db.prepare('INSERT INTO events(job_id,state,message,created) VALUES(?,?,?,?)').run(jobId, state, message, now());
   }
   const dispatch = createDispatchService({ db, validate, event, fail, id, now });
-  const beginSubmission = submissionService(db, event, clock);
+  function isDraftJob(jobId){const row=db.prepare('SELECT j.platform,d.snapshot FROM jobs j JOIN dispatches d ON d.id=j.dispatch_id WHERE j.id=?').get(jobId);return row?.platform==='channels'&&JSON.parse(row.snapshot)?.publication?.videoVisibility?.channels==='private';}
+  const beginSubmission = submissionService(db, event, clock,{isDraft:isDraftJob});
   // Submissions interrupted by a restart are never retried automatically.
   for (const job of db.prepare("SELECT * FROM jobs WHERE state IN ('uploading','submitting','opening_settings')").all()) {
     const uncertain=job.state!=='uploading';
@@ -222,7 +224,7 @@ export function createStudio({ dataDir = join(root, '.data'), tickMs = 1000, dem
       catch {return false;}
     },
     accountAvailable:id=>!deletingAccounts.has(id) && !!db.prepare('SELECT 1 FROM accounts WHERE id=?').get(id)});
-  const publicationAction=publicationActions({db,clock,getIntent,getJob,event,
+  const publicationAction=publicationActions({db,clock,getIntent,getJob,event,isDraft:isDraftJob,
     hasModel:modelReady,hasVerifier:platform=>!!verifier||readers.has(platform),
     canRecover:()=>typeof runtime.observeRecovery==='function',interrupt:id=>recovery.interrupt(id)});
   const agentTools=workflowTools({macros,publicationAction,getIntent,context:()=>({
@@ -233,7 +235,7 @@ export function createStudio({ dataDir = join(root, '.data'), tickMs = 1000, dem
   const macroTimer=setInterval(()=>macros.tick().catch(()=>console.error('任务调度未完成')),tickMs);
   const watching = new Set();
   const activeTasks=new Map();
-  const authChecks=new Map();let monitorBusy=false;
+  const authChecks=new Map();const diagnosticLog=new Map();let monitorBusy=false;
   async function syncIdentity(account, passive = false) {
     if(authChecks.has(account.id))return authChecks.get(account.id);
     const work=(async()=>{
@@ -246,6 +248,13 @@ export function createStudio({ dataDir = join(root, '.data'), tickMs = 1000, dem
       return identity;
     } catch(e) {
       if (!closed) db.prepare('UPDATE accounts SET status=?,checked_at=? WHERE id=?').run(e.state || 'detecting',now(),account.id);
+      if (!closed && ['channels','kuaishou'].includes(account.platform) && Date.now()-(diagnosticLog.get(account.id)||0)>30000) {
+        diagnosticLog.set(account.id,Date.now());
+        const probe=await runtime.diagnoseIdentity?.(account.id);
+        const hints=probe?.hints;
+        const hintText=hints?`；页面内ID=${hints.candidates.slice(0,5).join(',')||'无'}；存储键=${(hints.storageKeys||[]).join(',')||'无'}；页面文本=${JSON.stringify((hints.textSample||'').slice(0,120))}`:'';
+        console.error(`[身份核验] ${account.platform}/${account.name}：${e.message}`+(probe?`；页面=${probe.url||'—'}${hintText}；最近请求=${probe.paths.join(' | ')||'—'}`:''));
+      }
       throw e;
     }
     })();
@@ -271,7 +280,7 @@ export function createStudio({ dataDir = join(root, '.data'), tickMs = 1000, dem
   function getJob(jobId) { const job = db.prepare('SELECT * FROM jobs WHERE id=?').get(jobId); if (!job) throw fail('任务不存在', 404); return job; }
   function snapshot() {
     return {
-      modelSettings:models.view(),imageSettings:images.view(),videoSettings:videoModels.view(),capabilities: { accountDeletion: true,creatorReaders:readerStatus },macroTemplates:macros.templates(),macroRuns:macros.runs(),
+      modelSettings:models.view(),imageSettings:images.view(),videoSettings:videoModels.view(),capabilities: { channelsAdapterRevision,accountDeletion: true,creatorReaders:readerStatus },macroTemplates:macros.templates(),macroRuns:macros.runs(),
       platforms,
       accounts: db.prepare('SELECT * FROM accounts ORDER BY created').all(),
       assets: db.prepare("SELECT a.*,d.day AS archiveDate,COALESCE(n.note,'') AS note FROM assets a LEFT JOIN asset_dates d ON a.id=d.asset_id LEFT JOIN asset_notes n ON n.asset_id=a.id ORDER BY d.day DESC,a.created DESC,a.rowid DESC").all().map(a=>({...a,source:(()=>{const r=db.prepare('SELECT source FROM asset_sources WHERE asset_id=?').get(a.id);return r?JSON.parse(r.source):null;})()})),
@@ -309,7 +318,7 @@ export function createStudio({ dataDir = join(root, '.data'), tickMs = 1000, dem
       if (!a) { issues.push('目标账号不存在'); continue; }
       if (deletingAccounts.has(a.id)) { issues.push(a.name+'：账号正在删除，请重新选择'); continue; }
       if (!platforms[a.platform].types.includes(content.type)) issues.push(`${platforms[a.platform].name}：当前路线不支持该内容类型`);
-      if(['xhs','douyin'].includes(a.platform)){
+      if(['xhs','douyin','kuaishou','channels'].includes(a.platform)){
         const videos=assets.filter(x=>x?.mime.startsWith('video/')),images=assets.filter(x=>x?.mime.startsWith('image/'));
         if(content.type==='video' && (videos.length!==1||images.length))issues.push(platforms[a.platform].name+'视频任务请仅选择一个视频，封面在后台处理');
         if(a.platform==='xhs' && content.type==='note' && videos.length)issues.push('小红书图片笔记不能混入视频');
@@ -344,7 +353,7 @@ export function createStudio({ dataDir = join(root, '.data'), tickMs = 1000, dem
       const receipt=await adapter.submit(account,content,()=>{beginSubmission(job.id,automatic?'按任务中用户选择的“工具直接发布”执行最终提交。':'用户确认真实提交；禁止自动重发。');clicked=true;},{isActive:active,onProgress:message=>{step=message;if(!closed&&(clicked||active()))event(job.id,clicked?'submitting':'uploading',message);}});
       if(closed)return;
       db.prepare('UPDATE jobs SET receipt=? WHERE id=?').run(JSON.stringify(receipt),job.id);
-      event(job.id,'submitted','平台页面出现提交成功标志；尚未核验审核与公开状态。');
+      event(job.id,'submitted',receipt.action==='draft_saved'?'视频号草稿保存成功，未发表。':'平台页面出现提交成功标志；尚未核验审核与公开状态。');
     }catch(e){if(!closed){
       if(!clicked&&(e.code==='operation_cancelled'||!active()))return;
       if(clicked&&e.state==='needs_verification'){
@@ -549,10 +558,10 @@ export function createStudio({ dataDir = join(root, '.data'), tickMs = 1000, dem
           catch { event(job.id,'needs_manual','原页面无法显示，请从任务详情打开可见浏览器后处理。'); }
           return;
         }
-        if (!closed && preparing && getIntent(job.id).policy.recovery?.enabled!==false && typeof runtime.observeRecovery==='function' && getJob(job.id).state==='uploading' &&
+        if (!closed && preparing && !e.noAutoRecovery && getIntent(job.id).policy.recovery?.enabled!==false && typeof runtime.observeRecovery==='function' && getJob(job.id).state==='uploading' &&
             (!e.state || e.state==='needs_manual') && !attemptsFor(db,job.id).length) {
           if(recoveryEditor){recoveryEditor.failureCode=e.code==='image_upload_failed'?'image_upload_failed':null;const snapshot=JSON.parse(db.prepare('SELECT snapshot FROM dispatches WHERE id=?').get(job.dispatch_id).snapshot);recoveryEditor.coordinateGoal=preparationGoal(snapshot,job.platform,step,e.code);}
-          event(job.id,'recovering',e.state==='needs_manual'?`准备失败：${e.message} 正在观察原账号页面。`:`${step}未完成，正在观察原账号页面。`);
+          event(job.id,'recovering',e.state==='needs_manual'?`准备失败：${e.message} 正在观察原账号页面。`:`${step}未完成：${String(e.message||e.name).split('\n')[0].slice(0,280)}，正在观察原账号页面。`);
           release();
           await recovery.run(job,recoveryAccount,recoveryEditor,publicationPolicy(getIntent(job.id).policy).recovery);
           return;
@@ -921,6 +930,6 @@ export function createStudio({ dataDir = join(root, '.data'), tickMs = 1000, dem
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT || 4318); const studio = createStudio();
   studio.server.listen(port, '127.0.0.1', () => console.log(`Matrix Studio 本地预览：http://127.0.0.1:${port}\n演示账号仅模拟；真实账号会操作官方后台，最终提交需确认。`));
-  studio.server.on('error', e => { console.error(e.code === 'EADDRINUSE' ? `端口 ${port} 已占用，可设置 PORT 后重启。` : e.message); process.exit(1); });
+  studio.server.on('error', e => { console.error(e.code === 'EADDRINUSE' ? `端口 ${port} 已被现有服务占用，新代码未启动。请在原服务窗口按 Ctrl+C 停止后，再重新启动；仅刷新网页或另开启动窗口不会更新后台。` : e.message); process.exit(1); });
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, async () => { await studio.close(); process.exit(0); });
 }

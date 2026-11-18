@@ -1,5 +1,8 @@
+import {watchChannelsIdentity} from './wechat-channels.mjs';
+import {watchKuaishouIdentity} from './kuaishou-identity.mjs';
 import {watchBilibiliIdentity} from './bilibili-identity.mjs';
 const specs={
+  kuaishou:{host:'cp.kuaishou.com',pattern:/^(?:快手号\s*[:：]?\s*)?([A-Za-z0-9_.-]+)$/,selector:'.header-info-card .user-kwai-id'},
   douyin:{host:'creator.douyin.com',pattern:/抖音号\s*[:：]?\s*([A-Za-z0-9_.-]+)/,selector:'[data-account-self],.user-info,[class*="userInfo"],[class*="accountInfo"],[class*="user-info"],[class*="account-info"]'},
   xhs:{host:'creator.xiaohongshu.com',pattern:/小红书号\s*[:：]?\s*([A-Za-z0-9_.-]+)/,selector:'[data-account-self],.user-info,[class*="userInfo"],[class*="account-info"],[class*="user-info"]'},
 };
@@ -8,6 +11,12 @@ export async function creatorTextIdentity(page,platform){
   const spec=specs[platform];if(!spec||new URL(page.url()).hostname!==spec.host)return null;
   const values=await page.locator(spec.selector).evaluateAll(ns=>ns.filter(n=>n.getClientRects().length).map(n=>n.innerText||''));
   const ids=new Set();for(const text of values){const m=text.match(spec.pattern);if(m)ids.add(m[1]);}
+  // The hover card is not always rendered; the profile page also prints 快手号 as text.
+  if(platform==='kuaishou'&&ids.size!==1){
+    const text=await page.evaluate(()=>document.body.innerText||'').catch(()=>'');
+    const m=text.match(/快手号\s*[:：]\s*([A-Za-z0-9_.-]{3,})/);
+    if(m)ids.add(m[1]);
+  }
   if(ids.size!==1)return null;
   return {platformId:[...ids][0],displayName:''};
 }
@@ -15,21 +24,29 @@ export async function creatorTextIdentity(page,platform){
 export async function creatorIdentityReady(page,platform,readIdentity,since,{timeoutMs=10000}={}){
   const spec=specs[platform],end=Date.now()+timeoutMs;if(!spec)return null;
   do{
+    if(platform==='kuaishou'&&new URL(page.url()).hostname===spec.host){
+      const trigger=page.locator('.user-info-dpd').filter({visible:true});
+      if(await trigger.count()===1)await trigger.hover({timeout:1500}).catch(()=>{});
+    }
     if(new URL(page.url()).hostname!==spec.host){await new Promise(r=>setTimeout(r,100));continue;}
     const fresh=readIdentity?.(since);if(fresh)return fresh;
     let timer;
     try{
       const snapshot=await Promise.race([
-        page.evaluate(({selector,pattern})=>{
+        page.evaluate(({selector,pattern,platform})=>{
           const visible=n=>{for(let p=n;p;p=p.parentElement){const s=getComputedStyle(p);if(s.display==='none'||s.visibility==='hidden')return false;}return Boolean(n.getClientRects().length);};
           const login=[...document.querySelectorAll('button,span,div')].some(n=>visible(n)&&/^(扫码登录|手机号登录|请先登录)$/.test(n.textContent.trim())&&![...n.children].some(c=>c.textContent.trim()===n.textContent.trim()));
-          const ids=[...new Set([...document.querySelectorAll(selector)].filter(visible).flatMap(n=>{const m=(n.innerText||'').match(new RegExp(pattern));return m?[m[1]]:[];}))];return {login,ids};
-        },{selector:spec.selector,pattern:spec.pattern.source}),
+          const ids=[...new Set([...document.querySelectorAll(selector)].filter(visible).flatMap(n=>{const m=(n.innerText||'').match(new RegExp(pattern));return m?[m[1]]:[];}))];
+          let textId=null;
+          if(platform==='kuaishou'&&!ids.length){const m=(document.body.innerText||'').match(/快手号\s*[:：]\s*([A-Za-z0-9_.-]{3,})/);if(m)textId=m[1];}
+          return {login,ids,textId};
+        },{selector:spec.selector,pattern:spec.pattern.source,platform}),
         new Promise((_,reject)=>timer=setTimeout(()=>reject(Error('identity DOM not ready')),Math.max(1,Math.min(1000,end-Date.now())))),
       ]);
       const current=readIdentity?.(since);if(current)return current;
       if(snapshot.login)throw Object.assign(new Error('请在可见后台完成扫码登录。'),{state:'needs_login',status:409});
       if(snapshot.ids.length===1)return {platformId:snapshot.ids[0],displayName:''};
+      if(snapshot.textId)return {platformId:snapshot.textId,displayName:''};
     }catch(e){if(e.state)throw e;}finally{clearTimeout(timer);}
     await new Promise(r=>setTimeout(r,100));
   }while(Date.now()<end);
@@ -40,8 +57,10 @@ export async function creatorIdentityReady(page,platform,readIdentity,since,{tim
 // Never replay signed requests or use Cookie existence as proof of an authenticated account.
 export function watchCreatorIdentity(page,platform){
   if(platform==='bilibili')return watchBilibiliIdentity(page);
+  if(platform==='kuaishou')return watchKuaishouIdentity(page);
+  if(platform==='channels')return watchChannelsIdentity(page);
   const spec=specs[platform];let latest=null;
-  if(!spec)return ()=>null;
+  if(!spec||platform==='kuaishou')return ()=>null;
   page.on('response',async response=>{
     try{
       const url=new URL(response.url());
